@@ -377,6 +377,18 @@ func (l4 *L4) EnsureInternalLoadBalancer(nodeNames []string, svc *corev1.Service
 	}
 
 	options := l4.getILBOptions()
+
+	if options.SubnetName != "" {
+		_, err := l4.cloud.GetSubnetwork(l4.cloud.Region(), options.SubnetName)
+		if utils.IsNotFoundError(err) {
+			err = utils.NewInvalidSubnetConfigurationError(l4.cloud.ProjectID(), options.SubnetName)
+		}
+		if err != nil {
+			result.Error = err
+			return result
+		}
+	}
+
 	subnetworkURL, err := l4.getServiceSubnetworkURL(options)
 	if err != nil {
 		result.Error = err
