@@ -43,6 +43,7 @@ import (
 	"k8s.io/ingress-gce/pkg/l4lb"
 	multiprojectgce "k8s.io/ingress-gce/pkg/multiproject/common/gce"
 	multiprojectstart "k8s.io/ingress-gce/pkg/multiproject/start"
+	"k8s.io/ingress-gce/pkg/negbinding"
 	"k8s.io/ingress-gce/pkg/network"
 	providerconfigclient "k8s.io/ingress-gce/pkg/providerconfig/client/clientset/versioned"
 	"k8s.io/ingress-gce/pkg/psc"
@@ -167,6 +168,11 @@ func main() {
 		negCRDMeta := svcneg.CRDMeta()
 		if _, err := crdHandler.EnsureCRD(negCRDMeta, true); err != nil {
 			klog.Fatalf("Failed to ensure ServiceNetworkEndpointGroup CRD: %v", err)
+		}
+
+		negBindingCRDMeta := negbinding.CRDMeta()
+		if _, err := crdHandler.EnsureCRD(negBindingCRDMeta, true); err != nil {
+			klog.Fatalf("Failed to ensure NetworkEndpointGroupBinding CRD: %v", err)
 		}
 	}
 	svcNegClient, err := svcnegclient.NewForConfig(kubeConfig)
