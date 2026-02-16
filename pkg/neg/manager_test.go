@@ -102,12 +102,14 @@ func NewTestSyncerManager(kubeClient kubernetes.Interface) (*syncerManager, *gce
 		negtypes.NewAdapter(testContext.Cloud, testContext.NegMetrics),
 		zoneGetter,
 		testContext.SvcNegClient,
+		nil, // TODO(yushkevicha): add NegBindingClient to testContext
 		testContext.KubeSystemUID,
 		testContext.PodInformer.GetIndexer(),
 		testContext.ServiceInformer.GetIndexer(),
 		testContext.EndpointSliceInformer.GetIndexer(),
 		testContext.NodeInformer.GetIndexer(),
 		testContext.SvcNegInformer.GetIndexer(),
+		testContext.NegBindingInformer.GetIndexer(),
 		metricscollector.FakeSyncerMetrics(),
 		false, //enableNonGcpMode
 		testContext.EnableDualStackNEG,

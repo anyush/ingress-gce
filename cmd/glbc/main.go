@@ -44,6 +44,7 @@ import (
 	multiprojectgce "k8s.io/ingress-gce/pkg/multiproject/common/gce"
 	multiprojectstart "k8s.io/ingress-gce/pkg/multiproject/start"
 	"k8s.io/ingress-gce/pkg/negbinding"
+	negbindingclient "k8s.io/ingress-gce/pkg/negbinding/client/clientset/versioned"
 	"k8s.io/ingress-gce/pkg/network"
 	providerconfigclient "k8s.io/ingress-gce/pkg/providerconfig/client/clientset/versioned"
 	"k8s.io/ingress-gce/pkg/psc"
@@ -209,6 +210,11 @@ func main() {
 		}
 	}
 
+	negBindingClient, err := negbindingclient.NewForConfig(kubeConfig)
+	if err != nil {
+		klog.Fatalf("Failed to create NetworkEndpointGroupBinding client: %v", err)
+	}
+
 	namer, err := app.NewNamer(kubeClient, flags.F.ClusterName, firewalls.DefaultFirewallName, rootLogger)
 	if err != nil {
 		klog.Fatalf("app.NewNamer(ctx.KubeClient, %q, %q) = %v", flags.F.ClusterName, firewalls.DefaultFirewallName, err)
@@ -262,6 +268,8 @@ func main() {
 			go syncerMetrics.Run(stopCh)
 
 			if flags.F.LeaderElection.LeaderElect {
+				// TODO negbindingclient?
+
 				err := multiprojectstart.StartWithLeaderElection(
 					ctx,
 					leaderElectKubeClient,
@@ -349,7 +357,7 @@ func main() {
 		EnableL4NetLBForwardingRulesOptimizations: flags.F.EnableL4NetLBForwardingRulesOptimizations,
 		ReadOnlyMode:                              flags.F.ReadOnlyMode,
 	}
-	ctx, err := ingctx.NewControllerContext(kubeClient, backendConfigClient, frontendConfigClient, firewallCRClient, svcNegClient, svcAttachmentClient, networkClient, nodeTopologyClient, eventRecorderKubeClient, cloud, namer, kubeSystemUID, ctxConfig, rootLogger)
+	ctx, err := ingctx.NewControllerContext(kubeClient, backendConfigClient, frontendConfigClient, firewallCRClient, svcNegClient, svcAttachmentClient, networkClient, nodeTopologyClient, eventRecorderKubeClient, negBindingClient, cloud, namer, kubeSystemUID, ctxConfig, rootLogger)
 	if err != nil {
 		klog.Fatalf("unable to set up controller context: %v", err)
 	}
@@ -714,6 +722,7 @@ func createNEGController(ctx *ingctx.ControllerContext, systemHealth *systemheal
 	negController, err := neg.NewController(
 		ctx.KubeClient,
 		ctx.SvcNegClient,
+		ctx.NegBindingClient,
 		ctx.EventRecorderClient,
 		ctx.KubeSystemUID,
 		ctx.IngressInformer,
@@ -725,6 +734,7 @@ func createNEGController(ctx *ingctx.ControllerContext, systemHealth *systemheal
 		ctx.NetworkInformer,
 		ctx.GKENetworkParamsInformer,
 		ctx.NodeTopologyInformer,
+		ctx.NegBindingInformer,
 		ctx.HasSynced,
 		ctx.L4Namer,
 		ctx.DefaultBackendSvcPort,

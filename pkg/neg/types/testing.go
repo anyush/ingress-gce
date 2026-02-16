@@ -36,6 +36,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/cloud-provider-gcp/providers/gce"
 	"k8s.io/ingress-gce/pkg/neg/metrics"
+	negbindingfake "k8s.io/ingress-gce/pkg/negbinding/client/clientset/versioned/fake"
+	informernegbinding "k8s.io/ingress-gce/pkg/negbinding/client/informers/externalversions/negbinding/v1beta1"
 	svcnegclient "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned"
 	negfake "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned/fake"
 	informersvcneg "k8s.io/ingress-gce/pkg/svcneg/client/informers/externalversions/svcneg/v1beta1"
@@ -70,6 +72,7 @@ type TestContext struct {
 	NetworkInformer            cache.SharedIndexInformer
 	GKENetworkParamSetInformer cache.SharedIndexInformer
 	NodeTopologyInformer       cache.SharedIndexInformer
+	NegBindingInformer         cache.SharedIndexInformer
 
 	KubeSystemUID      types.UID
 	ResyncPeriod       time.Duration
@@ -88,6 +91,7 @@ func NewTestContextWithKubeClient(kubeClient kubernetes.Interface) *TestContext 
 	negClient := negfake.NewSimpleClientset()
 	networkClient := netfake.NewSimpleClientset()
 	nodeTopologyClient := nodetopologyfake.NewSimpleClientset()
+	negBindingClient := negbindingfake.NewSimpleClientset()
 	fakeGCE := gce.NewFakeGCECloud(gce.DefaultTestClusterValues())
 	MockNetworkEndpointAPIs(fakeGCE)
 
@@ -111,6 +115,7 @@ func NewTestContextWithKubeClient(kubeClient kubernetes.Interface) *TestContext 
 		NetworkInformer:            informernetwork.NewNetworkInformer(networkClient, resyncPeriod, utils.NewNamespaceIndexer()),
 		GKENetworkParamSetInformer: informergkenetworkparamset.NewGKENetworkParamSetInformer(networkClient, resyncPeriod, utils.NewNamespaceIndexer()),
 		NodeTopologyInformer:       informernodetopology.NewNodeTopologyInformer(nodeTopologyClient, resyncPeriod, utils.NewNamespaceIndexer()),
+		NegBindingInformer:         informernegbinding.NewNetworkEndpointGroupBindingInformer(negBindingClient, namespace, resyncPeriod, utils.NewNamespaceIndexer()),
 		KubeSystemUID:              kubeSystemUID,
 		ResyncPeriod:               resyncPeriod,
 		NumGCWorkers:               numGCWorkers,

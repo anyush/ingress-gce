@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/cloud-provider/service/helpers"
 	"k8s.io/ingress-gce/pkg/annotations"
+	negbindingv1beta1 "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1"
 	svcnegv1beta1 "k8s.io/ingress-gce/pkg/apis/svcneg/v1beta1"
 	"k8s.io/ingress-gce/pkg/controller/translator"
 	"k8s.io/ingress-gce/pkg/flags"
@@ -48,6 +49,7 @@ import (
 	"k8s.io/ingress-gce/pkg/neg/syncers/labels"
 	negtypes "k8s.io/ingress-gce/pkg/neg/types"
 	"k8s.io/ingress-gce/pkg/negannotation"
+	negbindingclient "k8s.io/ingress-gce/pkg/negbinding/client/clientset/versioned"
 	"k8s.io/ingress-gce/pkg/network"
 	svcnegclient "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned"
 	"k8s.io/ingress-gce/pkg/utils"
@@ -61,17 +63,19 @@ import (
 // Controller is network endpoint group controller.
 // It determines whether NEG for a service port is needed, then signals NegSyncerManager to sync it.
 type Controller struct {
-	manager         negtypes.NegSyncerManager
-	gcPeriod        time.Duration
-	recorder        record.EventRecorder
-	namer           negtypes.NetworkEndpointGroupNamer
-	l4Namer         namer.L4ResourcesNamer
-	zoneGetter      *zonegetter.ZoneGetter
-	networkResolver network.Resolver
+	negBindingManager *NegBindingSyncerManager
+	manager           negtypes.NegSyncerManager
+	gcPeriod          time.Duration
+	recorder          record.EventRecorder
+	namer             negtypes.NetworkEndpointGroupNamer
+	l4Namer           namer.L4ResourcesNamer
+	zoneGetter        *zonegetter.ZoneGetter
+	networkResolver   network.Resolver
 
 	hasSynced             func() bool
 	ingressLister         cache.Indexer
 	serviceLister         cache.Indexer
+	negbindingLister      cache.Indexer
 	client                kubernetes.Interface
 	defaultBackendService utils.ServicePort
 
@@ -84,6 +88,9 @@ type Controller struct {
 	// nodeTopologyQueue acts as an intermeidate queue to trigger sync on all
 	// syncers on Node Topology resource updates.
 	nodeTopologyQueue workqueue.RateLimitingInterface
+	// negBindingQueue acts as an intermeidate queue to trigger sync
+	// on related backend on NetworkEndpointGroupsBinding resource updates.
+	negBindingQueue workqueue.RateLimitingInterface
 
 	// syncTracker tracks the latest time that service and endpoint changes are processed
 	syncTracker utils.TimeTracker
@@ -127,6 +134,7 @@ type Controller struct {
 func NewController(
 	kubeClient kubernetes.Interface,
 	svcNegClient svcnegclient.Interface,
+	negBindingClient negbindingclient.Interface,
 	eventRecorderClient kubernetes.Interface,
 	kubeSystemUID types.UID,
 	ingressInformer cache.SharedIndexInformer,
@@ -138,6 +146,7 @@ func NewController(
 	networkInformer cache.SharedIndexInformer,
 	gkeNetworkParamSetInformer cache.SharedIndexInformer,
 	nodeTopologyInformer cache.SharedIndexInformer,
+	negbindingInformer cache.SharedIndexInformer,
 	hasSynced func() bool,
 	l4Namer namer.L4ResourcesNamer,
 	defaultBackendService utils.ServicePort,
@@ -193,12 +202,14 @@ func NewController(
 		cloud,
 		zoneGetter,
 		svcNegClient,
+		negBindingClient,
 		kubeSystemUID,
 		podInformer.GetIndexer(),
 		serviceInformer.GetIndexer(),
 		endpointSliceInformer.GetIndexer(),
 		nodeInformer.GetIndexer(),
 		svcNegInformer.GetIndexer(),
+		negbindingInformer.GetIndexer(),
 		syncerMetrics,
 		enableNonGcpMode,
 		enableDualStackNEG,
@@ -238,6 +249,7 @@ func NewController(
 	enableMultiSubnetClusterPhase1 := flags.F.EnableMultiSubnetClusterPhase1
 
 	negController := &Controller{
+		negBindingManager:              NewNegBindingSyncerManager(manager),
 		client:                         kubeClient,
 		manager:                        manager,
 		gcPeriod:                       gcPeriod,
@@ -249,10 +261,12 @@ func NewController(
 		hasSynced:                      hasSynced,
 		ingressLister:                  ingressInformer.GetIndexer(),
 		serviceLister:                  serviceInformer.GetIndexer(),
+		negbindingLister:               negbindingInformer.GetIndexer(),
 		networkResolver:                network.NewNetworksResolver(networkIndexer, gkeNetworkParamSetIndexer, cloud, enableMultiNetworking, logger),
 		serviceQueue:                   workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "neg_service_queue"),
 		endpointQueue:                  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "neg_endpoint_queue"),
 		nodeQueue:                      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "neg_node_queue"),
+		negBindingQueue:                workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "neg_negbinding_queue"),
 		syncTracker:                    utils.NewTimeTracker(),
 		reflector:                      reflector,
 		syncerMetrics:                  syncerMetrics,
@@ -357,6 +371,13 @@ func NewController(
 			}
 		},
 	})
+	negbindingInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    negController.enqueueNEGBinding,
+		DeleteFunc: negController.enqueueNEGBinding,
+		UpdateFunc: func(old, cur interface{}) {
+			negController.enqueueNEGBinding(cur)
+		},
+	})
 	if enableMultiSubnetClusterPhase1 {
 		nodeTopologyInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
@@ -403,6 +424,7 @@ func (c *Controller) Run() {
 	go wait.Until(c.serviceWorker, time.Second, c.stopCh)
 	go wait.Until(c.endpointWorker, time.Second, c.stopCh)
 	go wait.Until(c.nodeWorker, time.Second, c.stopCh)
+	go wait.Until(c.negBindingWorker, time.Second, c.stopCh)
 	if c.enableMultiSubnetClusterPhase1 {
 		go wait.Until(c.nodeTopologyWorker, time.Second, c.stopCh)
 	}
@@ -434,6 +456,7 @@ func (c *Controller) stop() {
 	c.serviceQueue.ShutDown()
 	c.endpointQueue.ShutDown()
 	c.nodeQueue.ShutDown()
+	c.negBindingQueue.ShutDown()
 	if c.enableMultiSubnetClusterPhase1 {
 		c.nodeTopologyQueue.ShutDown()
 	}
@@ -631,6 +654,36 @@ func (c *Controller) processNodeTopology() {
 	c.manager.SyncAllSyncers()
 }
 
+func (c *Controller) negBindingWorker() {
+	for {
+		func() {
+			key, quit := c.negBindingQueue.Get()
+			if quit {
+				return
+			}
+			defer c.negBindingQueue.Done(key)
+			c.processNEGBinding(key.(string))
+		}()
+	}
+}
+
+func (c *Controller) processNEGBinding(key string) {
+	nb, exists, err := c.negbindingLister.GetByKey(key)
+	if err != nil || !exists {
+		return
+	}
+
+	binding := nb.(*negbindingv1beta1.NetworkEndpointGroupBinding)
+
+	obj, exists, err := c.serviceLister.GetByKey(binding.Namespace + "/" + binding.Spec.BackendRef.Name)
+	service := obj.(*apiv1.Service)
+	networkInfo, err := c.networkResolver.ServiceNetwork(service)
+
+	err = c.negBindingManager.EnsureSyncerForNegBinding(binding, networkInfo)
+	c.logger.V(3).Info("processed NegBinding", "bindingName", binding.Name, "err", err)
+	// c.enqueueService(cache.ExplicitKey(binding.Namespace + "/" + binding.Spec.BackendRef.Name))
+}
+
 // mergeIngressPortInfo merges Ingress PortInfo into portInfoMap if the service has Enable Ingress annotation.
 func (c *Controller) mergeIngressPortInfo(service *apiv1.Service, name types.NamespacedName, portInfoMap negtypes.PortInfoMap, networkInfo *network.NetworkInfo) error {
 	if !c.enableNEGsForIngress {
@@ -692,6 +745,36 @@ func (c *Controller) mergeStandaloneNEGsPortInfo(service *apiv1.Service, name ty
 
 		if err := portInfoMap.Merge(negtypes.NewPortInfoMap(name.Namespace, name.Name, exposedNegSvcPort, c.namer, true, customNames, networkInfo)); err != nil {
 			return fmt.Errorf("failed to merge service ports exposed as standalone NEGs (%v) into ingress referenced service ports (%v): %w", exposedNegSvcPort, portInfoMap, err)
+		}
+	}
+
+	return nil
+}
+
+// mergeStandaloneNEGsPortInfo merge NEGBindind NEGs PortInfo into portInfoMap
+func (c *Controller) mergeBoundNEGsPortInfo(service *apiv1.Service, name types.NamespacedName, bindings []negbindingv1beta1.NetworkEndpointGroupBinding, portInfoMap negtypes.PortInfoMap, negUsage *metricscollector.NegServiceState, networkInfo *network.NetworkInfo) error {
+	if bindings != nil {
+		knowSvcPortSet := make(negtypes.SvcPortTupleSet)
+		for _, sp := range service.Spec.Ports {
+			knowSvcPortSet.Insert(
+				negtypes.SvcPortTuple{
+					Port:       sp.Port,
+					Name:       sp.Name,
+					TargetPort: sp.TargetPort.String(),
+				},
+			)
+		}
+
+		negBindingsMap, err := boundNegServicePorts(bindings, knowSvcPortSet)
+		if err != nil {
+			return err
+		}
+
+		// TODO(yushkevicha)
+		// negUsage.CustomNamedNeg += len(customNames)
+
+		if err := portInfoMap.Merge(negtypes.NewPortInfoMapForNEGBinding(name.Namespace, name.Name, negBindingsMap, networkInfo)); err != nil {
+			return fmt.Errorf("failed to merge service ports exposed as bounded NEGs (%v) into ingress referenced service ports (%v): %w", negBindingsMap, portInfoMap, err)
 		}
 	}
 
@@ -957,6 +1040,17 @@ func (c *Controller) enqueueNodeTopology(obj interface{}) {
 	}
 	c.logger.V(3).Info("Adding NodeTopology to nodeTopologyQueue for processing", "nodeTopology", key)
 	c.nodeTopologyQueue.Add(key)
+}
+
+func (c *Controller) enqueueNEGBinding(obj interface{}) {
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+	if err != nil {
+		c.logger.Error(err, "Failed to generate NetworkEndpointGroupBinding key")
+		c.negMetrics.PublishNegControllerErrorCountMetrics(err, true)
+		return
+	}
+	c.logger.V(3).Info("Adding NetworkEndpointGroupBinding to serviceQueue for processing", "networkEndpointGroupBinding", key)
+	c.negBindingQueue.Add(key)
 }
 
 func (c *Controller) gc() {

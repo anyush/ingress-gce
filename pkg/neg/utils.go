@@ -22,6 +22,7 @@ import (
 	nodetopologyv1 "github.com/GoogleCloudPlatform/gke-networking-api/apis/nodetopology/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	negbindingv1beta1 "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1"
 	"k8s.io/ingress-gce/pkg/neg/types"
 	"k8s.io/ingress-gce/pkg/negannotation"
 )
@@ -50,6 +51,25 @@ func negServicePorts(ann *negannotation.NegAnnotation, knownSvcTupleSet types.Sv
 	}
 
 	return svcPortTupleSet, customNameMap, utilerrors.NewAggregate(errList)
+}
+
+func boundNegServicePorts(bindings []negbindingv1beta1.NetworkEndpointGroupBinding, knownSvcTupleSet types.SvcPortTupleSet) (map[types.SvcPortTuple][]negbindingv1beta1.NetworkEndpointGroupBinding, error) {
+	negBindings := make(map[types.SvcPortTuple][]negbindingv1beta1.NetworkEndpointGroupBinding)
+
+	for _, negBinding := range bindings {
+		port := negBinding.Spec.BackendRef.Port
+		tuple, ok := knownSvcTupleSet.Get(port)
+		if !ok {
+			return nil, fmt.Errorf("port %v specified in binding doesn't exist in the service", port)
+		}
+
+		if _, ok := negBindings[tuple]; !ok {
+			negBindings[tuple] = []negbindingv1beta1.NetworkEndpointGroupBinding{}
+		}
+		negBindings[tuple] = append(negBindings[tuple], negBinding)
+	}
+
+	return negBindings, nil
 }
 
 func isZoneChanged(oldZones, newZones []string) bool {

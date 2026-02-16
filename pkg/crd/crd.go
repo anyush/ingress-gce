@@ -114,7 +114,7 @@ func (h *CRDHandler) createOrUpdateCRD(meta *CRDMeta, namespacedScoped bool) (*a
 		return h.client.ApiextensionsV1().CustomResourceDefinitions().Update(context.TODO(), crd, metav1.UpdateOptions{})
 	}
 
-	h.logger.V(0).Info("Creating CRD...", "kind", meta.kind)
+	h.logger.V(0).Info("Creating CRD...", "kind", "crd", meta.kind, crd)
 	return h.client.ApiextensionsV1().CustomResourceDefinitions().Create(context.TODO(), crd, metav1.CreateOptions{})
 }
 
@@ -152,11 +152,12 @@ func crd(meta *CRDMeta, namespacedScoped bool, logger klog.Logger) *apiextension
 			logger.Error(nil, "No validation schema exists for CRD", "kind", meta.kind, "apiVersion", v.name)
 		}
 		version := apiextensionsv1.CustomResourceDefinitionVersion{
-			Name:       v.name,
-			Served:     true,
-			Storage:    false,
-			Schema:     validationSchema,
-			Deprecated: v.deprecated,
+			Name:         v.name,
+			Served:       true,
+			Storage:      false,
+			Schema:       validationSchema,
+			Subresources: v.subresources,
+			Deprecated:   v.deprecated,
 		}
 		// Set storage to true for the latest version.
 		if i == 0 {

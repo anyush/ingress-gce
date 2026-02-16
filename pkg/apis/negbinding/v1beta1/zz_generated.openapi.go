@@ -24,14 +24,18 @@ package v1beta1
 import (
 	common "k8s.io/kube-openapi/pkg/common"
 	spec "k8s.io/kube-openapi/pkg/validation/spec"
+	ptr "k8s.io/utils/ptr"
 )
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
-		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.BackendRefConfig":                schema_pkg_apis_negbinding_v1beta1_BackendRefConfig(ref),
-		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.NetworkEndpointGroupBinding":     schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBinding(ref),
-		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.NetworkEndpointGroupBindingSpec": schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBindingSpec(ref),
-		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.RequestedNegRef":                 schema_pkg_apis_negbinding_v1beta1_RequestedNegRef(ref),
+		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.BackendRefConfig":                  schema_pkg_apis_negbinding_v1beta1_BackendRefConfig(ref),
+		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.Condition":                         schema_pkg_apis_negbinding_v1beta1_Condition(ref),
+		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.NetworkEndpointGroupBinding":       schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBinding(ref),
+		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.NetworkEndpointGroupBindingSpec":   schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBindingSpec(ref),
+		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.NetworkEndpointGroupBindingStatus": schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBindingStatus(ref),
+		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.SpecNegRef":                        schema_pkg_apis_negbinding_v1beta1_SpecNegRef(ref),
+		"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.StatusNegRef":                      schema_pkg_apis_negbinding_v1beta1_StatusNegRef(ref),
 	}
 }
 
@@ -74,6 +78,66 @@ func schema_pkg_apis_negbinding_v1beta1_BackendRefConfig(ref common.ReferenceCal
 				Required: []string{"group", "kind", "name", "port"},
 			},
 		},
+	}
+}
+
+func schema_pkg_apis_negbinding_v1beta1_Condition(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "type of condition in CamelCase or in foo.example.com/CamelCase.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Description: "status of the condition, one of True, False, Unknown.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"lastTransitionTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"message": {
+						SchemaProps: spec.SchemaProps{
+							Description: "message is a human readable message indicating details about the transition. This may be an empty string.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"type", "status", "lastTransitionTime", "reason", "message"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
@@ -147,17 +211,19 @@ func schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBindingSpec(ref comm
 								"x-kubernetes-list-map-keys": []interface{}{
 									"name",
 								},
-								"x-kubernetes-list-type": "map",
+								"x-kubernetes-list-type":   "map",
+								"x-kubernetes-validations": []interface{}{map[string]interface{}{"message": "Single NEGBinding can manage only single NEG per subnet", "rule": "self.all(i, self.filter(j, j.subnet == i.subnet).size() <= 1)"}},
 							},
 						},
 						SchemaProps: spec.SchemaProps{
 							Description: "NetworkEndpointGroups references NEGs which should be managed by controller",
+							MaxItems:    ptr.To[int64](50),
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
 									SchemaProps: spec.SchemaProps{
 										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.RequestedNegRef"),
+										Ref:     ref("k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.SpecNegRef"),
 									},
 								},
 							},
@@ -168,15 +234,80 @@ func schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBindingSpec(ref comm
 			},
 		},
 		Dependencies: []string{
-			"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.BackendRefConfig", "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.RequestedNegRef"},
+			"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.BackendRefConfig", "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.SpecNegRef"},
 	}
 }
 
-func schema_pkg_apis_negbinding_v1beta1_RequestedNegRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_negbinding_v1beta1_NetworkEndpointGroupBindingStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RequestedNegRef references NetworkEndpointGroups across cluster zones which should be managed by controller",
+				Description: "NetworkEndpointGroupBindingStatus is the status for a BackendConfig resource",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"lastSyncTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Last time the NEG syncer syncs associated NEGs.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions describe the current conditions of the NetworkEndpointGroupBinding.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.Condition"),
+									},
+								},
+							},
+						},
+					},
+					"networkEndpointGroups": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"resourceURL",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Negs contains currently managed NEGs referenced by NetworkEndpointGroupsBinding",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.StatusNegRef"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time", "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.Condition", "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.StatusNegRef"},
+	}
+}
+
+func schema_pkg_apis_negbinding_v1beta1_SpecNegRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "SpecNegRef references NetworkEndpointGroups across cluster zones which should be managed by controller",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"name": {
@@ -188,13 +319,52 @@ func schema_pkg_apis_negbinding_v1beta1_RequestedNegRef(ref common.ReferenceCall
 					},
 					"subnet": {
 						SchemaProps: spec.SchemaProps{
-							Default: "",
-							Type:    []string{"string"},
-							Format:  "",
+							Default:   "",
+							MaxLength: ptr.To[int64](63),
+							Type:      []string{"string"},
+							Format:    "",
 						},
 					},
 				},
 				Required: []string{"name", "subnet"},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_negbinding_v1beta1_StatusNegRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "StatusNegRef references NetworkEndpointGroup which is actively managed by controller",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"resourceURL": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ResourceURL is the GCE Server-defined fully-qualified URL for the GCE NEG resource",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"subnetURL": {
+						SchemaProps: spec.SchemaProps{
+							Description: "URL of the subnetwork to which all network endpoints in the NEG belong.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"state": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Current state of Neg: ACTIVE - actively managing endpoints, CLEANING_UP - currently removing all endpoints, CLEANED_UP - all endpoints detached",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"resourceURL", "subnetURL", "state"},
 			},
 		},
 	}

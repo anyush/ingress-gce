@@ -133,6 +133,7 @@ func newTestControllerWithParamsAndContext(kubeClient kubernetes.Interface, test
 	return NewController(
 		kubeClient,
 		testContext.SvcNegClient,
+		nil, // TODO(yushkevicha): add NegBindingClient to testContext
 		kubeClient,
 		testContext.KubeSystemUID,
 		testContext.IngressInformer,
@@ -144,6 +145,7 @@ func newTestControllerWithParamsAndContext(kubeClient kubernetes.Interface, test
 		testContext.NetworkInformer,
 		testContext.GKENetworkParamSetInformer,
 		testContext.NodeTopologyInformer,
+		testContext.NegBindingInformer,
 		func() bool { return true },
 		testContext.L4Namer,
 		defaultBackend,

@@ -20,6 +20,7 @@ import (
 	"k8s.io/ingress-gce/pkg/neg/syncers/labels"
 	negtypes "k8s.io/ingress-gce/pkg/neg/types"
 	svcnegclient "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned"
+	negbindingclient "k8s.io/ingress-gce/pkg/negbinding/client/clientset/versioned"
 	svcnegfake "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned/fake"
 	"k8s.io/ingress-gce/pkg/utils"
 	"k8s.io/ingress-gce/pkg/utils/namer"
@@ -73,15 +74,15 @@ func TestStartNEGController_StopJoin(t *testing.T) {
 	// that can run without panics.
 	var capturedStopCh <-chan struct{}
 	orig := newNEGController
-	newNEGController = func(kc kubernetes.Interface, sc svcnegclient.Interface, ec kubernetes.Interface, uid types.UID,
+	newNEGController = func(kc kubernetes.Interface, sc svcnegclient.Interface, nbc negbindingclient.Interface, ec kubernetes.Interface, uid types.UID,
 		ing cache.SharedIndexInformer, svc cache.SharedIndexInformer, pod cache.SharedIndexInformer, node cache.SharedIndexInformer,
-		es cache.SharedIndexInformer, sn cache.SharedIndexInformer, netInf cache.SharedIndexInformer, gke cache.SharedIndexInformer, nt cache.SharedIndexInformer,
+		es cache.SharedIndexInformer, sn cache.SharedIndexInformer, netInf cache.SharedIndexInformer, gke cache.SharedIndexInformer, nt cache.SharedIndexInformer, nb cache.SharedIndexInformer,
 		synced func() bool, l4 namer.L4ResourcesNamer, defSP utils.ServicePort, cloud negtypes.NetworkEndpointGroupCloud, zg *zonegetter.ZoneGetter, nm negtypes.NetworkEndpointGroupNamer,
 		resync time.Duration, gc time.Duration, workers int, enableRR bool, runL4 bool, nonGCP bool, dualStack bool, lp labels.PodLabelPropagationConfig,
 		multiNetworking bool, ingressRegional bool, runNetLB bool, readOnly bool, enableNEGsForIngress bool,
 		stopCh <-chan struct{}, l klog.Logger, negMetrics *metrics.NegMetrics, syncerMetrics *syncMetrics.SyncerMetrics) (*neg.Controller, error) {
 		capturedStopCh = stopCh
-		return neg.NewController(kc, sc, ec, uid, ing, svc, pod, node, es, sn, netInf, gke, nt, synced, l4, defSP, cloud, zg, nm,
+		return neg.NewController(kc, sc, nbc, ec, uid, ing, svc, pod, node, es, sn, netInf, gke, nt, nb, synced, l4, defSP, cloud, zg, nm,
 			resync, gc, workers, enableRR, runL4, nonGCP, dualStack, lp, multiNetworking, ingressRegional, runNetLB, readOnly, enableNEGsForIngress, stopCh, l, negMetrics, syncerMetrics)
 	}
 	t.Cleanup(func() { newNEGController = orig })

@@ -42,6 +42,7 @@ import (
 	negsyncer "k8s.io/ingress-gce/pkg/neg/syncers"
 	podlabels "k8s.io/ingress-gce/pkg/neg/syncers/labels"
 	negtypes "k8s.io/ingress-gce/pkg/neg/types"
+	negbindingclient "k8s.io/ingress-gce/pkg/negbinding/client/clientset/versioned"
 	svcnegclient "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned"
 	"k8s.io/ingress-gce/pkg/utils"
 	"k8s.io/ingress-gce/pkg/utils/common"
@@ -74,6 +75,7 @@ type syncerManager struct {
 	serviceLister       cache.Indexer
 	endpointSliceLister cache.Indexer
 	svcNegLister        cache.Indexer
+	negBindingLister    cache.Indexer
 
 	// TODO: lock per service instead of global lock
 	mu sync.Mutex
@@ -91,6 +93,8 @@ type syncerManager struct {
 	reflector readiness.Reflector
 	//svcNegClient handles lifecycle operations for NEG CRs
 	svcNegClient svcnegclient.Interface
+	// negBindingClient handles operations related to NEGBinding CRs
+	negBindingClient negbindingclient.Interface
 
 	// kubeSystemUID is used to by syncers when NEG CRD is enabled
 	kubeSystemUID types.UID
@@ -126,12 +130,14 @@ func newSyncerManager(namer negtypes.NetworkEndpointGroupNamer,
 	cloud negtypes.NetworkEndpointGroupCloud,
 	zoneGetter *zonegetter.ZoneGetter,
 	svcNegClient svcnegclient.Interface,
+	negBindingClient negbindingclient.Interface,
 	kubeSystemUID types.UID,
 	podLister cache.Indexer,
 	serviceLister cache.Indexer,
 	endpointSliceLister cache.Indexer,
 	nodeLister cache.Indexer,
 	svcNegLister cache.Indexer,
+	negBindingLister cache.Indexer,
 	syncerMetrics *metricscollector.SyncerMetrics,
 	enableNonGcpMode bool,
 	enableDualStackNEG bool,
@@ -143,7 +149,7 @@ func newSyncerManager(namer negtypes.NetworkEndpointGroupNamer,
 	var vmIpPortZoneMap map[string]struct{}
 	updateZoneMap(&vmIpPortZoneMap, negtypes.NodeFilterForNetworkEndpointType(negtypes.VmIpPortEndpointType), zoneGetter, logger, negMetrics)
 
-	return &syncerManager{
+	manager := &syncerManager{
 		namer:               namer,
 		l4Namer:             l4Namer,
 		recorder:            recorder,
@@ -154,10 +160,12 @@ func newSyncerManager(namer negtypes.NetworkEndpointGroupNamer,
 		serviceLister:       serviceLister,
 		endpointSliceLister: endpointSliceLister,
 		svcNegLister:        svcNegLister,
+		negBindingLister:    negBindingLister,
 		svcPortMap:          make(map[serviceKey]negtypes.PortInfoMap),
 		syncerMap:           make(map[negtypes.NegSyncerKey]negtypes.NegSyncer),
 		syncerMetrics:       syncerMetrics,
 		svcNegClient:        svcNegClient,
+		negBindingClient:    negBindingClient,
 		kubeSystemUID:       kubeSystemUID,
 		enableNonGcpMode:    enableNonGcpMode,
 		enableDualStackNEG:  enableDualStackNEG,
@@ -167,6 +175,8 @@ func newSyncerManager(namer negtypes.NetworkEndpointGroupNamer,
 		lpConfig:            lpConfig,
 		negMetrics:          negMetrics,
 	}
+
+	return manager
 }
 
 // EnsureSyncer starts and stops syncers based on the input service ports. Returns the number of
@@ -195,86 +205,107 @@ func (manager *syncerManager) EnsureSyncers(namespace, name string, newPorts neg
 	successfulSyncers := 0
 	errorSyncers := 0
 	for svcPort, portInfo := range removes {
-		syncer, ok := manager.syncerMap[manager.getSyncerKey(namespace, name, svcPort, portInfo)]
-		if ok {
-			syncer.Stop()
-		}
+		for _, key := range manager.getSyncerKeys(namespace, name, svcPort, portInfo) {
+			syncer, ok := manager.syncerMap[key]
+			if ok {
+				syncer.Stop()
+			}
 
-		err := manager.ensureDeleteSvcNegCR(namespace, portInfo.NegName)
-		if err != nil {
-			errList = append(errList, err)
+			// SvcNeg not used if lifecycle not managed.
+			if key.LifecycleManaged() {
+				err := manager.ensureDeleteSvcNegCR(namespace, portInfo.NegName)
+				if err != nil {
+					errList = append(errList, err)
+				}
+			}
 		}
 	}
 
 	// Ensure a syncer is running for each port in newPorts.
 	for svcPort, portInfo := range newPorts {
-		syncerKey := manager.getSyncerKey(namespace, name, svcPort, portInfo)
-		syncer, ok := manager.syncerMap[syncerKey]
-		// To ensure that a NEG CR always exists during the lifecycle of a NEG, do not create a
-		// syncer for the NEG until the NEG CR is successfully created. This will reduce the
-		// possibility of invalid states and reduces complexity of garbage collection
-		// To reduce the possibility of NEGs being leaked, ensure a SvcNeg CR exists for every
-		// desired port.
-		if err := manager.ensureSvcNegCR(key, portInfo); err != nil {
-			errList = append(errList, fmt.Errorf("failed to ensure svc neg cr %s/%s/%d for port: %w ", namespace, portInfo.NegName, svcPort.ServicePort, err))
-			errorSyncers += 1
-			continue
-		}
-		if !ok {
-			// determine the implementation that calculates NEG endpoints on each sync.
-			epc := negsyncer.GetEndpointsCalculator(
-				manager.podLister,
-				manager.nodeLister,
-				manager.serviceLister,
-				manager.zoneGetter,
-				syncerKey,
-				portInfo.EpCalculatorMode,
-				manager.logger.WithValues("service", klog.KRef(syncerKey.Namespace, syncerKey.Name), "negName", syncerKey.NegName),
-				manager.enableDualStackNEG,
-				manager.syncerMetrics,
-				&portInfo.NetworkInfo,
-				portInfo.L4LBType,
-				manager.negMetrics,
-			)
-			nonDefaultSubnetNEGNamer := manager.namer
-			if syncerKey.NegType == negtypes.VmIpEndpointType {
-				nonDefaultSubnetNEGNamer = manager.l4Namer
+		for _, syncerKey := range manager.getSyncerKeys(namespace, name, svcPort, portInfo) {
+			syncer, ok := manager.syncerMap[syncerKey]
+
+			// SvcNeg not used if lifecycle not managed.
+			if syncerKey.LifecycleManaged() {
+				// To ensure that a NEG CR always exists during the lifecycle of a NEG, do not create a
+				// syncer for the NEG until the NEG CR is successfully created. This will reduce the
+				// possibility of invalid states and reduces complexity of garbage collection
+				// To reduce the possibility of NEGs being leaked, ensure a SvcNeg CR exists for every
+				// desired port.
+				if err := manager.ensureSvcNegCR(key, portInfo); err != nil {
+					errList = append(errList, fmt.Errorf("failed to ensure svc neg cr %s/%s/%d for port: %w ; key: %v", namespace, portInfo.NegName, svcPort.ServicePort, err, syncerKey))
+					errorSyncers += 1
+					continue
+				}
+			}
+			if !ok {
+				// determine the implementation that calculates NEG endpoints on each sync.
+				epc := negsyncer.GetEndpointsCalculator(
+					manager.podLister,
+					manager.nodeLister,
+					manager.serviceLister,
+					manager.zoneGetter,
+					syncerKey,
+					portInfo.EpCalculatorMode,
+					manager.logger.WithValues("service", klog.KRef(syncerKey.Namespace, syncerKey.Name), "negName", syncerKey.NegName),
+					manager.enableDualStackNEG,
+					manager.syncerMetrics,
+					&portInfo.NetworkInfo,
+					portInfo.L4LBType,
+					manager.negMetrics,
+				)
+				nonDefaultSubnetNEGNamer := manager.namer
+				if syncerKey.NegType == negtypes.VmIpEndpointType {
+					nonDefaultSubnetNEGNamer = manager.l4Namer
+				}
+
+				negStorage := negsyncer.NewSvcNegStorage(
+					string(manager.kubeSystemUID),
+					syncerKey.NegType == negtypes.VmIpPortEndpointType && !manager.namer.IsNEG(portInfo.NegName),
+					nonDefaultSubnetNEGNamer,
+					syncerKey,
+					portInfo.NetworkInfo,
+					manager.zoneGetter,
+					manager.recorder,
+					manager.cloud,
+					manager.negMetrics,
+					manager.logger,
+					manager.serviceLister,
+					manager.svcNegLister,
+					manager.svcNegClient,
+				)
+				syncer = negsyncer.NewTransactionSyncer(
+					syncerKey,
+					manager.recorder,
+					manager.cloud,
+					manager.zoneGetter,
+					manager.podLister,
+					manager.serviceLister,
+					manager.endpointSliceLister,
+					manager.reflector,
+					epc,
+					string(manager.kubeSystemUID),
+					manager.syncerMetrics,
+					manager.logger,
+					manager.lpConfig,
+					manager.enableDualStackNEG,
+					portInfo.NetworkInfo,
+					manager.negMetrics,
+					negStorage,
+				)
+				manager.syncerMap[syncerKey] = syncer
 			}
 
-			syncer = negsyncer.NewTransactionSyncer(
-				syncerKey,
-				manager.recorder,
-				manager.cloud,
-				manager.zoneGetter,
-				manager.podLister,
-				manager.serviceLister,
-				manager.endpointSliceLister,
-				manager.nodeLister,
-				manager.svcNegLister,
-				manager.reflector,
-				epc,
-				string(manager.kubeSystemUID),
-				manager.svcNegClient,
-				manager.syncerMetrics,
-				syncerKey.NegType == negtypes.VmIpPortEndpointType && !manager.namer.IsNEG(portInfo.NegName),
-				manager.logger,
-				manager.lpConfig,
-				manager.enableDualStackNEG,
-				portInfo.NetworkInfo,
-				nonDefaultSubnetNEGNamer,
-				manager.negMetrics,
-			)
-			manager.syncerMap[syncerKey] = syncer
-		}
-
-		if syncer.IsStopped() {
-			if err := syncer.Start(); err != nil {
-				errList = append(errList, err)
-				errorSyncers += 1
-				continue
+			if syncer.IsStopped() {
+				if err := syncer.Start(); err != nil {
+					errList = append(errList, err)
+					errorSyncers += 1
+					continue
+				}
 			}
+			successfulSyncers += 1
 		}
-		successfulSyncers += 1
 	}
 	err := utilerrors.NewAggregate(errList)
 	manager.negMetrics.PublishNegManagerProcessMetrics(metrics.SyncProcess, err, start)
@@ -289,8 +320,10 @@ func (manager *syncerManager) StopSyncer(namespace, name string) {
 	key := getServiceKey(namespace, name)
 	if ports, ok := manager.svcPortMap[key]; ok {
 		for svcPort, portInfo := range ports {
-			if syncer, ok := manager.syncerMap[manager.getSyncerKey(namespace, name, svcPort, portInfo)]; ok {
-				syncer.Stop()
+			for _, syncerKey := range manager.getSyncerKeys(namespace, name, svcPort, portInfo) {
+				if syncer, ok := manager.syncerMap[syncerKey]; ok {
+					syncer.Stop()
+				}
 			}
 		}
 		delete(manager.svcPortMap, key)
@@ -304,9 +337,11 @@ func (manager *syncerManager) Sync(namespace, name string) {
 	key := getServiceKey(namespace, name)
 	if portInfoMap, ok := manager.svcPortMap[key]; ok {
 		for svcPort, portInfo := range portInfoMap {
-			if syncer, ok := manager.syncerMap[manager.getSyncerKey(namespace, name, svcPort, portInfo)]; ok {
-				if !syncer.IsStopped() {
-					syncer.Sync()
+			for _, syncerKey := range manager.getSyncerKeys(namespace, name, svcPort, portInfo) {
+				if syncer, ok := manager.syncerMap[syncerKey]; ok {
+					if !syncer.IsStopped() {
+						syncer.Sync()
+					}
 				}
 			}
 		}
@@ -894,27 +929,50 @@ func patchNegStatus(svcNegClient svcnegclient.Interface, oldNeg, newNeg negv1bet
 	return neg, err
 }
 
+// TODO(yushkevicha): remove, use getSyncerKeys everywhere
 // getSyncerKey encodes a service namespace, name, service port and targetPort into a string key
 func (manager *syncerManager) getSyncerKey(namespace, name string, servicePortKey negtypes.PortInfoMapKey, portInfo negtypes.PortInfo) negtypes.NegSyncerKey {
-	networkEndpointType := negtypes.VmIpPortEndpointType
-	calculatorMode := negtypes.L7Mode
-	if manager.enableNonGcpMode {
-		networkEndpointType = negtypes.NonGCPPrivateEndpointType
-	}
-	if portInfo.PortTuple.Empty() {
-		networkEndpointType = negtypes.VmIpEndpointType
-		calculatorMode = portInfo.EpCalculatorMode
+	return manager.getSyncerKeys(namespace, name, servicePortKey, portInfo)[0]
+}
+
+func (manager *syncerManager) getSyncerKeys(namespace, name string, servicePortKey negtypes.PortInfoMapKey, portInfo negtypes.PortInfo) []negtypes.NegSyncerKey {
+	res := []negtypes.NegSyncerKey{}
+	if portInfo.NegName != "" {
+		networkEndpointType := negtypes.VmIpPortEndpointType
+		calculatorMode := negtypes.L7Mode
+		if manager.enableNonGcpMode {
+			networkEndpointType = negtypes.NonGCPPrivateEndpointType
+		}
+		if portInfo.PortTuple.Empty() {
+			networkEndpointType = negtypes.VmIpEndpointType
+			calculatorMode = portInfo.EpCalculatorMode
+		}
+
+		key := negtypes.NegSyncerKey{
+			Namespace:        namespace,
+			Name:             name,
+			NegName:          portInfo.NegName,
+			PortTuple:        portInfo.PortTuple,
+			NegType:          networkEndpointType,
+			EpCalculatorMode: calculatorMode,
+			L4LBType:         portInfo.L4LBType,
+		}
+		res = append(res, key)
 	}
 
-	return negtypes.NegSyncerKey{
-		Namespace:        namespace,
-		Name:             name,
-		NegName:          portInfo.NegName,
-		PortTuple:        portInfo.PortTuple,
-		NegType:          networkEndpointType,
-		EpCalculatorMode: calculatorMode,
-		L4LBType:         portInfo.L4LBType,
+	for _, negBinding := range portInfo.NegBindings {
+		key := negtypes.NegSyncerKey{
+			Namespace:        namespace,
+			Name:             name,
+			NegBindingName:   negBinding.Name,
+			PortTuple:        portInfo.PortTuple,
+			NegType:          negtypes.VmIpPortEndpointType,
+			EpCalculatorMode: negtypes.L7Mode,
+		}
+		res = append(res, key)
 	}
+
+	return res
 }
 
 func getServiceKey(namespace, name string) serviceKey {
@@ -934,11 +992,25 @@ func (manager *syncerManager) removeCommonPorts(p1, p2 negtypes.PortInfoMap) {
 			continue
 		}
 
-		syncerKey1 := manager.getSyncerKey("", "", port, portInfo1)
-		syncerKey2 := manager.getSyncerKey("", "", port, portInfo2)
-		if reflect.DeepEqual(syncerKey1, syncerKey2) {
+		boundNegsSyncerKeys1 := manager.getSyncerKeys("", "", port, portInfo1)
+		boundNegsSyncerKeys2 := manager.getSyncerKeys("", "", port, portInfo2)
+
+		if portInfo1.NegName != "" && portInfo2.NegName != "" {
+			key1 := boundNegsSyncerKeys1[0]
+			key2 := boundNegsSyncerKeys2[0]
+			if reflect.DeepEqual(key1, key2) {
+				portInfo1.NegName = ""
+				portInfo2.NegName = ""
+			}
+		}
+
+		pi1NegBindings := portInfo1.NegBindingsDifference(portInfo2)
+		pi2NegBindings := portInfo2.NegBindingsDifference(portInfo1)
+		if portInfo1.NegName == "" && portInfo2.NegName == "" && len(pi1NegBindings) == 0 && len(pi2NegBindings) == 0 {
 			delete(p1, port)
 			delete(p2, port)
 		}
+		portInfo1.NegBindings = pi1NegBindings
+		portInfo2.NegBindings = pi2NegBindings
 	}
 }

@@ -16,6 +16,7 @@ limitations under the License.
 package negbinding
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apis "k8s.io/ingress-gce/pkg/apis/negbinding"
 	"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1"
 	"k8s.io/ingress-gce/pkg/crd"
@@ -29,7 +30,15 @@ func CRDMeta() *crd.CRDMeta {
 		"networkendpointgroupbinding",
 		"networkendpointgroupbindings",
 		[]*crd.Version{
-			crd.NewVersion("v1beta1", "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.NetworkEndpointGroupBinding", v1beta1.GetOpenAPIDefinitions, false),
+			crd.NewVersion(
+				"v1beta1",
+				"k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1.NetworkEndpointGroupBinding",
+				v1beta1.GetOpenAPIDefinitions,
+				&apiextensionsv1.CustomResourceSubresources{
+					Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+				},
+				false,
+			),
 		},
 		"negbinding",
 	)

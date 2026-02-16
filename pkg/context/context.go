@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/cloud-provider-gcp/providers/gce"
+	negbindingv1beta1 "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1"
 	backendconfigclient "k8s.io/ingress-gce/pkg/backendconfig/client/clientset/versioned"
 	informerbackendconfig "k8s.io/ingress-gce/pkg/backendconfig/client/informers/externalversions/backendconfig/v1"
 	"k8s.io/ingress-gce/pkg/common/typed"
@@ -43,6 +44,8 @@ import (
 	"k8s.io/ingress-gce/pkg/instancegroups"
 	l4metrics "k8s.io/ingress-gce/pkg/l4lb/metrics"
 	"k8s.io/ingress-gce/pkg/metrics"
+	negbindingclient "k8s.io/ingress-gce/pkg/negbinding/client/clientset/versioned"
+	informernegbinding "k8s.io/ingress-gce/pkg/negbinding/client/informers/externalversions/negbinding/v1beta1"
 	"k8s.io/ingress-gce/pkg/recorders"
 	serviceattachmentclient "k8s.io/ingress-gce/pkg/serviceattachment/client/clientset/versioned"
 	informerserviceattachment "k8s.io/ingress-gce/pkg/serviceattachment/client/informers/externalversions/serviceattachment/v1"
@@ -71,6 +74,7 @@ type ControllerContext struct {
 	FirewallClient      firewallclient.Interface
 	EventRecorderClient kubernetes.Interface
 	NodeTopologyClient  nodetopologyclient.Interface
+	NegBindingClient    negbindingclient.Interface
 
 	Cloud *gce.Cloud
 
@@ -94,6 +98,7 @@ type ControllerContext struct {
 	NetworkInformer          cache.SharedIndexInformer
 	GKENetworkParamsInformer cache.SharedIndexInformer
 	NodeTopologyInformer     cache.SharedIndexInformer
+	NegBindingInformer       cache.SharedIndexInformer
 
 	ControllerMetrics *metrics.ControllerMetrics
 	L4Metrics         *l4metrics.Collector
@@ -153,6 +158,7 @@ func NewControllerContext(
 	networkClient networkclient.Interface,
 	nodeTopologyClient nodetopologyclient.Interface,
 	eventRecorderClient kubernetes.Interface,
+	negBindingClient negbindingclient.Interface,
 	cloud *gce.Cloud,
 	clusterNamer *namer.Namer,
 	kubeSystemUID types.UID,
@@ -172,6 +178,9 @@ func NewControllerContext(
 		logger.Error(err, "unable to SetTransForm")
 	}
 
+	negBindingInformer := informernegbinding.NewNetworkEndpointGroupBindingInformer(negBindingClient, config.Namespace, config.ResyncPeriod, utils.NewNamespaceIndexer())
+	negBindingInformer.AddIndexers(cache.Indexers{NBServiceIndexName: indexNegBindingByService})
+
 	context := &ControllerContext{
 		KubeClient:              kubeClient,
 		FirewallClient:          firewallClient,
@@ -179,6 +188,7 @@ func NewControllerContext(
 		SAClient:                saClient,
 		EventRecorderClient:     eventRecorderClient,
 		NodeTopologyClient:      nodeTopologyClient,
+		NegBindingClient:        negBindingClient,
 		Cloud:                   cloud,
 		ClusterNamer:            clusterNamer,
 		L4Namer:                 namer.NewL4Namer(string(kubeSystemUID), clusterNamer),
@@ -191,6 +201,7 @@ func NewControllerContext(
 		PodInformer:             podInformer,
 		NodeInformer:            nodeInformer,
 		SvcNegInformer:          informersvcneg.NewServiceNetworkEndpointGroupInformer(svcnegClient, config.Namespace, config.ResyncPeriod, utils.NewNamespaceIndexer()),
+		NegBindingInformer:      negBindingInformer,
 		recordersManager:        recorders.NewManager(eventRecorderClient, logger),
 		logger:                  logger,
 	}
@@ -292,6 +303,7 @@ func (ctx *ControllerContext) HasSynced() bool {
 		ctx.NodeInformer.HasSynced,
 		ctx.SvcNegInformer.HasSynced,
 		ctx.EndpointSliceInformer.HasSynced,
+		ctx.NegBindingInformer.HasSynced,
 	}
 
 	if ctx.BackendConfigInformer != nil {
@@ -335,6 +347,7 @@ func (ctx *ControllerContext) Start(stopCh <-chan struct{}) {
 	go ctx.PodInformer.Run(stopCh)
 	go ctx.NodeInformer.Run(stopCh)
 	go ctx.EndpointSliceInformer.Run(stopCh)
+	go ctx.NegBindingInformer.Run(stopCh)
 
 	if ctx.ConfigMapInformer != nil {
 		go ctx.ConfigMapInformer.Run(stopCh)
@@ -437,4 +450,17 @@ func preserveNeeded(obj interface{}) (interface{}, error) {
 		node.Status.Images = nil
 	}
 	return obj, nil
+}
+
+// TODO(yushkevicha) move somewhere? (both)
+const NBServiceIndexName = "service-index"
+
+func indexNegBindingByService(obj interface{}) ([]string, error) {
+	nb, ok := obj.(*negbindingv1beta1.NetworkEndpointGroupBinding)
+	if !ok {
+		return []string{}, nil
+	}
+
+	key := nb.ObjectMeta.Namespace + "/" + nb.Spec.BackendRef.Name
+	return []string{key}, nil
 }

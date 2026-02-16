@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	negbindingv1beta1 "k8s.io/ingress-gce/pkg/apis/negbinding/v1beta1"
 	negv1beta1 "k8s.io/ingress-gce/pkg/apis/svcneg/v1beta1"
 	"k8s.io/ingress-gce/pkg/flags"
 	"k8s.io/ingress-gce/pkg/negannotation"
@@ -127,6 +128,9 @@ type PortInfo struct {
 
 	// NegName is the name of the NEG
 	NegName string
+
+	NegBindings []negbindingv1beta1.NetworkEndpointGroupBinding
+
 	// ReadinessGate indicates if the NEG associated with the port has NEG readiness gate enabled
 	// This is enabled with service port is reference by ingress.
 	// If the service port is only exposed as stand alone NEG, it should not be enabled.
@@ -194,6 +198,21 @@ func NewPortInfoMapForVMIPNEG(namespace, name string, namer namer.L4ResourcesNam
 	return ret
 }
 
+// NewPortInfoMapForNEGBinding creates PortInfoMap with empty NegName, but populated BoundNegNames,
+// since NEGBinding allows to provide multiple NEG names per ServicePort.
+func NewPortInfoMapForNEGBinding(namespace, name string, negBindingsMap map[SvcPortTuple][]negbindingv1beta1.NetworkEndpointGroupBinding, networkInfo *network.NetworkInfo) PortInfoMap {
+	ret := PortInfoMap{}
+	for svcPortTuple, negBindings := range negBindingsMap {
+		ret[PortInfoMapKey{svcPortTuple.Port}] = PortInfo{
+			PortTuple:     svcPortTuple,
+			NegBindings:   negBindings,
+			ReadinessGate: true,
+			NetworkInfo:   *networkInfo,
+		}
+	}
+	return ret
+}
+
 // Merge merges p2 into p1 PortInfoMap
 // It assumes the same key (service port) will have the same target port and negName
 // If not, it will throw error
@@ -203,7 +222,7 @@ func NewPortInfoMapForVMIPNEG(namespace, name string, namer namer.L4ResourcesNam
 func (p1 PortInfoMap) Merge(p2 PortInfoMap) error {
 	var err error
 	for mapKey, portInfo := range p2 {
-		mergedInfo := PortInfo{}
+		mergedInfo := PortInfo{NegBindings: []negbindingv1beta1.NetworkEndpointGroupBinding{}}
 		if existingPortInfo, ok := p1[mapKey]; ok {
 			if existingPortInfo.PortTuple != portInfo.PortTuple {
 				return fmt.Errorf("for service port %v, port tuple in existing map is %q, but the merge map has %q", mapKey, existingPortInfo.PortTuple, portInfo.PortTuple)
@@ -215,9 +234,16 @@ func (p1 PortInfoMap) Merge(p2 PortInfoMap) error {
 				return fmt.Errorf("For service port %v, Existing map has Calculator mode %v, but the merge map has %v", mapKey, existingPortInfo.EpCalculatorMode, portInfo.EpCalculatorMode)
 			}
 			mergedInfo.ReadinessGate = existingPortInfo.ReadinessGate
+			if existingPortInfo.NegBindings != nil {
+				mergedInfo.NegBindings = append(mergedInfo.NegBindings, existingPortInfo.NegBindings...)
+			}
 		}
 		mergedInfo.PortTuple = portInfo.PortTuple
 		mergedInfo.NegName = portInfo.NegName
+		if portInfo.NegBindings != nil {
+			mergedInfo.NegBindings = append(mergedInfo.NegBindings, portInfo.NegBindings...)
+		}
+
 		// Turn on the readiness gate if one of them is on
 		mergedInfo.ReadinessGate = mergedInfo.ReadinessGate || portInfo.ReadinessGate
 		mergedInfo.EpCalculatorMode = portInfo.EpCalculatorMode
@@ -239,9 +265,24 @@ func (p1 PortInfoMap) Difference(p2 PortInfoMap) PortInfoMap {
 		if ok && reflect.DeepEqual(p1[mapKey], p2PortInfo) {
 			continue
 		}
+		p1PortInfo.NegBindings = p1PortInfo.NegBindingsDifference(p2PortInfo)
 		result[mapKey] = p1PortInfo
 	}
 	return result
+}
+
+func (pi1 PortInfo) NegBindingsDifference(pi2 PortInfo) []negbindingv1beta1.NetworkEndpointGroupBinding {
+	res := []negbindingv1beta1.NetworkEndpointGroupBinding{}
+	pi2BindingsSet := sets.Set[string]{}
+	for _, binding := range pi2.NegBindings {
+		pi2BindingsSet.Insert(binding.Name)
+	}
+	for _, binding := range pi1.NegBindings {
+		if !pi2BindingsSet.Has(binding.Name) {
+			res = append(res, binding)
+		}
+	}
+	return res
 }
 
 func (p1 PortInfoMap) ToPortNegMap() negannotation.PortNegMap {
@@ -281,6 +322,9 @@ type NegSyncerKey struct {
 	Name string
 	// Name of neg
 	NegName string
+
+	// Name of managed NEGBinding
+	NegBindingName string
 	// PortTuple is the port tuple of the service backing the NEG
 	PortTuple SvcPortTuple
 
@@ -299,7 +343,14 @@ type NegSyncerKey struct {
 }
 
 func (key NegSyncerKey) String() string {
-	return fmt.Sprintf("%s/%s-%s-%s-%s-%s", key.Namespace, key.Name, key.NegName, key.PortTuple.String(), string(key.NegType), key.EpCalculatorMode)
+	if key.LifecycleManaged() {
+		return fmt.Sprintf("%s/%s-%s-%s-%s-%s", key.Namespace, key.Name, key.NegName, key.PortTuple.String(), string(key.NegType), key.EpCalculatorMode)
+	}
+	return fmt.Sprintf("%s/%s-binding-%s-%s-%s-%s", key.Namespace, key.Name, key.NegBindingName, key.PortTuple.String(), string(key.NegType), key.EpCalculatorMode)
+}
+
+func (key NegSyncerKey) LifecycleManaged() bool {
+	return key.NegBindingName == ""
 }
 
 // GetAPIVersion returns the compute API version to be used in order

@@ -19,8 +19,9 @@ package crd
 import (
 	"context"
 	"fmt"
-	"k8s.io/klog/v2"
 	"testing"
+
+	"k8s.io/klog/v2"
 
 	"github.com/google/go-cmp/cmp"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -37,7 +38,7 @@ var (
 	crdMeta = &CRDMeta{
 		groupName: "test.group.com",
 		versions: []*Version{
-			NewVersion("v1alpha1", "pkg/apis/test/v1alpha1.Test", testGetOpenAPIDefinitions, false),
+			NewVersion("v1alpha1", "pkg/apis/test/v1alpha1.Test", testGetOpenAPIDefinitions, nil, false),
 		},
 		kind:     "Test",
 		listKind: "TestList",

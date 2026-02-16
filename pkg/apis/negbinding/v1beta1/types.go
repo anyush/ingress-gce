@@ -42,7 +42,10 @@ type NetworkEndpointGroupBindingSpec struct {
 	// NetworkEndpointGroups references NEGs which should be managed by controller
 	// +listType=map
 	// +listMapKey=name
-	NetworkEndpointGroups []RequestedNegRef `json:"networkEndpointGroups"`
+	// +k8s:validation:maxItems=50
+	// +k8s:validation:cel[0]:rule="self.all(i, self.filter(j, j.subnet == i.subnet).size() <= 1)"
+	// +k8s:validation:cel[0]:message="Single NEGBinding can manage only single NEG per subnet"
+	NetworkEndpointGroups []SpecNegRef `json:"networkEndpointGroups"`
 }
 
 // BackendRefConfig specifies backendRef for the NetworkEndpointGroupBinding resource
@@ -51,7 +54,7 @@ type BackendRefConfig struct {
 	Group string         `json:"group"`
 	Kind  BackendRefKind `json:"kind"`
 	Name  string         `json:"name"`
-	Port  int            `json:"port"`
+	Port  int32          `json:"port"`
 }
 
 // +k8s:openapi-gen=true
@@ -62,45 +65,52 @@ const (
 )
 
 // +k8s:openapi-gen=true
-// RequestedNegRef references NetworkEndpointGroups across cluster zones which should be managed by controller
-type RequestedNegRef struct {
-	Name   string `json:"name"`
+// SpecNegRef references NetworkEndpointGroups across cluster zones which should be managed by controller
+type SpecNegRef struct {
+	Name string `json:"name"`
+	// +k8s:validation:maxLength=63
 	Subnet string `json:"subnet"`
 }
 
+// +k8s:openapi-gen=true
 // NetworkEndpointGroupBindingStatus is the status for a BackendConfig resource
 type NetworkEndpointGroupBindingStatus struct {
+	// Last time the NEG syncer syncs associated NEGs.
+	// +optional
+	LastSyncTime metav1.Time `json:"lastSyncTime,omitempty"`
 	// Conditions describe the current conditions of the NetworkEndpointGroupBinding.
 	// +listType=map
 	// +listMapKey=type
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Conditions []Condition `json:"conditions,omitempty"`
 	// Negs contains currently managed NEGs referenced by NetworkEndpointGroupsBinding
 	// +listType=map
-	// +listMapKey=id
+	// +listMapKey=resourceURL
 	NetworkEndpointGroups []StatusNegRef `json:"networkEndpointGroups,omitempty"`
 }
 
+// +k8s:openapi-gen=true
+type Condition metav1.Condition
+
+// +k8s:openapi-gen=true
 // StatusNegRef references NetworkEndpointGroup which is actively managed by controller
 type StatusNegRef struct {
-	// The unique identifier for the NEG resource in GCE API.
-	Id string `json:"id"`
-
-	// SelfLink is the GCE Server-defined fully-qualified URL for the GCE NEG resource
-	SelfLink string `json:"selfLink"`
+	// ResourceURL is the GCE Server-defined fully-qualified URL for the GCE NEG resource
+	ResourceURL string `json:"resourceURL"`
 
 	// URL of the subnetwork to which all network endpoints in the NEG belong.
 	SubnetURL string `json:"subnetURL"`
 
-	// NetworkEndpointType: Type of network endpoints in this network
-	// endpoint group.
-	NetworkEndpointType NetworkEndpointType `json:"networkEndpointType"`
+	// Current state of Neg: ACTIVE - actively managing endpoints, CLEANING_UP - currently removing all endpoints, CLEANED_UP - all endpoints detached
+	State NegState `json:"state"`
 }
 
 // +k8s:openapi-gen=true
-type NetworkEndpointType string
+type NegState string
 
 const (
-	VmIpPortEndpointType = NetworkEndpointType("GCE_VM_IP_PORT")
+	NegStateActive     = NegState("ACTIVE")
+	NegStateCleaningUp = NegState("CLEANING_UP")
+	NegStateCleanedUp  = NegState("CLEANED_UP")
 )
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

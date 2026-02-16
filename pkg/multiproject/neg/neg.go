@@ -163,6 +163,7 @@ func createNEGController(
 	negController, err := newNEGController(
 		kubeClient,
 		svcNegClient,
+		nil, // TODO(yushkevicha)
 		eventRecorderClient,
 		kubeSystemUID,
 		ingressInformer,
@@ -174,6 +175,7 @@ func createNEGController(
 		networkInformer,
 		gkeNetworkParamsInformer,
 		nodeTopologyInformer,
+		nil, // TODO(yushkevicha)
 		hasSynced,
 		l4Namer,
 		noDefaultBackendServicePort,
