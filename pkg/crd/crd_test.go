@@ -19,11 +19,13 @@ package crd
 import (
 	"context"
 	"fmt"
-	"k8s.io/klog/v2"
 	"testing"
+
+	"k8s.io/klog/v2"
 
 	"github.com/google/go-cmp/cmp"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
 	crdclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	crdclientfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,7 +39,14 @@ var (
 	crdMeta = &CRDMeta{
 		groupName: "test.group.com",
 		versions: []*Version{
-			NewVersion("v1alpha1", "pkg/apis/test/v1alpha1.Test", testGetOpenAPIDefinitions, false),
+			NewVersion(
+				"v1alpha1",
+				"pkg/apis/test/v1alpha1.Test",
+				testGetOpenAPIDefinitions, &apiextensionsv1.CustomResourceSubresources{
+					Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+				},
+				false,
+			),
 		},
 		kind:     "Test",
 		listKind: "TestList",
