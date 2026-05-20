@@ -57,12 +57,6 @@ const (
 	// NegCRControllerValue is used as the value for the managed-by label on NEG CRs when enabled.
 	NegCRControllerValue = "neg-controller"
 
-	// NEG CR Condition Reasons
-	NegSyncSuccessful           = "NegSyncSuccessful"
-	NegSyncFailed               = "NegSyncFailed"
-	NegInitializationSuccessful = "NegInitializationSuccessful"
-	NegInitializationFailed     = "NegInitializationFailed"
-
 	// NEG CRD Enabled Garbage Collection Event Reasons
 	NegGCError = "NegCRError"
 

@@ -48,6 +48,7 @@ import (
 	"k8s.io/ingress-gce/pkg/neg/metrics/metricscollector"
 	"k8s.io/ingress-gce/pkg/neg/readiness"
 	"k8s.io/ingress-gce/pkg/neg/syncers/labels"
+	"k8s.io/ingress-gce/pkg/neg/syncers/statusreporter"
 	negtypes "k8s.io/ingress-gce/pkg/neg/types"
 	"k8s.io/ingress-gce/pkg/network"
 	"k8s.io/ingress-gce/pkg/nodetopology"
@@ -1804,7 +1805,7 @@ func TestTransactionSyncerWithNegCR(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to initialize transaction syncer: %v", err)
 		}
-		negClient := syncer.svcNegClient
+		negClient := syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegClient
 		t.Run(tc.desc, func(t *testing.T) {
 			// fakeZoneGetter will list 3 zones for VM_IP_PORT NEGs.
 			expectZones := sets.NewString(negtypes.TestZone1, negtypes.TestZone2, negtypes.TestZone4)
@@ -1842,7 +1843,7 @@ func TestTransactionSyncerWithNegCR(t *testing.T) {
 			if err != nil {
 				t.Errorf("Failed to create test NEG CR: %s", err)
 			}
-			syncer.svcNegLister.Add(neg)
+			syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(neg)
 
 			err = syncer.ensureNetworkEndpointGroups()
 			if !tc.expectErr && err != nil {
@@ -2041,16 +2042,17 @@ func TestEnsureNetworkEndpointGroupsMSC(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			fakeCloud := negtypes.NewFakeNetworkEndpointGroupCloud(testSubnetworkURL, testNetworkURL)
 
-			_, syncer, err := newTestTransactionSyncer(fakeCloud, testNegType, tc.customNEGName != "")
+			negName := testNegName
+			if tc.customNEGName != "" {
+				negName = tc.customNEGName
+			}
+			_, syncer, err := newTestTransactionSyncerWithNegName(fakeCloud, testNegType, tc.customNEGName != "", negName)
 			if err != nil {
 				t.Fatalf("failed to initialize transaction syncer: %v", err)
 			}
-			if tc.customNEGName != "" {
-				syncer.NegSyncerKey.NegName = tc.customNEGName
-			}
 			zonegetter.SetNodeTopologyHasSynced(syncer.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 
-			negName := syncer.NegSyncerKey.NegName
+			negName = syncer.NegSyncerKey.NegName
 
 			for _, zone := range zones {
 				err := fakeCloud.CreateNetworkEndpointGroup(&composite.NetworkEndpointGroup{
@@ -2066,7 +2068,7 @@ func TestEnsureNetworkEndpointGroupsMSC(t *testing.T) {
 				}
 			}
 
-			negClient := syncer.svcNegClient
+			negClient := syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegClient
 			negRefByZone, err := negObjectReferences(fakeCloud, negv1beta1.ActiveState, sets.NewString(zones...), syncer.NegSyncerKey.NegName)
 			if err != nil {
 				t.Errorf("Failed to get negObjRef from NEG CR: %v", err)
@@ -2080,7 +2082,7 @@ func TestEnsureNetworkEndpointGroupsMSC(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to create test NEG CR: %s", err)
 			}
-			syncer.svcNegLister.Add(initialNegCr)
+			syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(initialNegCr)
 
 			if tc.nodeTopologyCr != nil {
 				if err := zonegetter.AddNodeTopologyCR(syncer.zoneGetter.(*zonegetter.ZoneGetter), tc.nodeTopologyCr); err != nil {
@@ -2196,7 +2198,7 @@ func TestUpdateInitStatusWithMultiSubnetCluster(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to initialize transaction syncer: %v", err)
 			}
-			svcNegClient := syncer.svcNegClient
+			svcNegClient := syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegClient
 
 			// Add topology to relect new state (default + non default subnets)
 			nodeTopologyInformer.GetIndexer().Add(&nodetopologyv1.NodeTopology{
@@ -2242,7 +2244,7 @@ func TestUpdateInitStatusWithMultiSubnetCluster(t *testing.T) {
 			if err != nil {
 				t.Errorf("Failed to create test NEG CR: %s", err)
 			}
-			syncer.svcNegLister.Add(svcNeg)
+			syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(svcNeg)
 
 			previousZones := oldActiveZones.Union(oldInactiveZones)
 			// Create a NEG in a new zone if zone expanded.
@@ -2251,9 +2253,7 @@ func TestUpdateInitStatusWithMultiSubnetCluster(t *testing.T) {
 				createNEGs(t, syncer, fakeCloud, negName, subnetConfig.SubnetPath, tc.newActiveZones, negv1beta1.ActiveState)
 			}
 
-			// This is the input list to updateInitStatus().
-			// It should only include NEG ref in the new active zones current subnets.
-			var activeNegList []negv1beta1.NegObjectReference
+			var activeNegList []*composite.NetworkEndpointGroup
 			for zone := range tc.newActiveZones {
 				for _, subnetConfig := range currentSubnets {
 					negName := subnetToNameMap[subnetConfig]
@@ -2261,13 +2261,12 @@ func TestUpdateInitStatusWithMultiSubnetCluster(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Failed to get NEG %s in zone %s: %v", negName, zone, err)
 					}
-					negRef := getNegObjectReference(neg, negv1beta1.ActiveState)
-					activeNegList = append(activeNegList, negRef)
+					activeNegList = append(activeNegList, neg)
 				}
 			}
 
 			// Inactive NEG refs should be added if there is any.
-			syncer.updateInitStatus(activeNegList, nil)
+			syncer.statusReporter.NEGsEnsured(activeNegList, nil)
 
 			// gather negCR to validate the updates
 			negCR, err := svcNegClient.NetworkingV1beta1().ServiceNetworkEndpointGroups(testServiceNamespace).Get(context.Background(), testNegName, metav1.GetOptions{})
@@ -2319,7 +2318,7 @@ func TestUpdateInitStatusTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to initialize transaction syncer: %v", err)
 	}
-	svcNegClient := syncer.svcNegClient
+	svcNegClient := syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegClient
 	currentSubnets := []nodetopologyv1.SubnetConfig{defaultSubnetConfig, secondarySubnetConfig1}
 
 	subnetToNameMap := generateNonDefaultSubnetNegNameMap(t, syncer, []nodetopologyv1.SubnetConfig{secondarySubnetConfig1})
@@ -2360,13 +2359,26 @@ func TestUpdateInitStatusTransitions(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to create test NEG CR: %s", err)
 	}
-	syncer.svcNegLister.Add(svcNeg)
+	syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(svcNeg)
 
 	// create new negs in the new subnet only in the current zones
 	allRefs = append(allRefs, createNEGs(t, syncer, fakeCloud, subnetToNameMap[secondarySubnetConfig1], secondarySubnetConfig1.SubnetPath, allZones, negv1beta1.ActiveState)...)
 
+	var compositeNEGs []*composite.NetworkEndpointGroup
+	for _, ref := range allRefs {
+		negInfo, err := negtypes.NegInfoFromNegRef(ref)
+		if err != nil {
+			t.Fatalf("Failed to parse NEG ref %v: %v", ref, err)
+		}
+		neg, err := fakeCloud.GetNetworkEndpointGroup(negInfo.Name, negInfo.Zone, meta.VersionGA, klog.TODO())
+		if err != nil {
+			t.Fatalf("Failed to get NEG %s in zone %s: %v", negInfo.Name, negInfo.Zone, err)
+		}
+		compositeNEGs = append(compositeNEGs, neg)
+	}
+
 	// Inactive NEG refs should be added if there is any.
-	syncer.updateInitStatus(allRefs, nil)
+	syncer.statusReporter.NEGsEnsured(compositeNEGs, nil)
 
 	// gather negCR to validate the updates
 	negCR, err := svcNegClient.NetworkingV1beta1().ServiceNetworkEndpointGroups(testServiceNamespace).Get(context.Background(), testNegName, metav1.GetOptions{})
@@ -2421,7 +2433,7 @@ func TestSubnetChanges(t *testing.T) {
 	ts.needInit = false
 	zonegetter.SetNodeTopologyHasSynced(ts.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 
-	svcNegClient := ts.svcNegClient
+	svcNegClient := ts.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegClient
 	currentSubnets := []nodetopologyv1.SubnetConfig{defaultSubnetConfig}
 
 	subnetToNameMap := make(map[nodetopologyv1.SubnetConfig]string)
@@ -2453,7 +2465,7 @@ func TestSubnetChanges(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to create test NEG CR: %s", err)
 	}
-	ts.svcNegLister.Add(svcNeg)
+	ts.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(svcNeg)
 
 	// Inactive NEG refs should be added if there is any.
 	ts.sync()
@@ -2594,7 +2606,7 @@ func TestIsSubnetChange(t *testing.T) {
 			}
 
 			negCR := createNegCR(ts.NegName, metav1.Now(), true, true, allRefs)
-			if err = ts.svcNegLister.Add(negCR); err != nil {
+			if err = ts.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(negCR); err != nil {
 				t.Errorf("failed to add neg to store:%s", err)
 			}
 			// Add topology to relect new state
@@ -2746,7 +2758,7 @@ func TestUpdateStatus(t *testing.T) {
 				if err != nil {
 					t.Fatalf("failed to initialize transaction syncer: %v", err)
 				}
-				svcNegClient := syncer.svcNegClient
+				svcNegClient := syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegClient
 				syncer.needInit = false
 				if len(tc.negRefs) == 0 {
 					err := fakeCloud.CreateNetworkEndpointGroup(&composite.NetworkEndpointGroup{
@@ -2774,9 +2786,12 @@ func TestUpdateStatus(t *testing.T) {
 				if err != nil {
 					t.Errorf("Failed to create test NEG CR: %s", err)
 				}
-				syncer.svcNegLister.Add(origCR)
+				syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(origCR)
 
-				syncer.updateStatus(syncErr)
+				needInit, err := syncer.statusReporter.SyncFinished(syncErr)
+				if err == nil && needInit {
+					syncer.needInit = true
+				}
 
 				negCR, err := svcNegClient.NetworkingV1beta1().ServiceNetworkEndpointGroups(testServiceNamespace).Get(context.Background(), testNegName, metav1.GetOptions{})
 				if err != nil {
@@ -2880,7 +2895,7 @@ func TestIsZoneChange(t *testing.T) {
 				refs = append(refs, neg)
 			}
 			negCR := createNegCR(syncer.NegName, metav1.Now(), true, true, refs)
-			if err = syncer.svcNegLister.Add(negCR); err != nil {
+			if err = syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(negCR); err != nil {
 				t.Errorf("failed to add neg to store:%s", err)
 			}
 
@@ -3012,7 +3027,7 @@ func TestUnknownNodes(t *testing.T) {
 	for _, eps := range testEndpointSlices {
 		s.endpointSliceLister.Add(eps)
 	}
-	s.svcNegLister.Add(neg)
+	s.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(neg)
 	// mark syncer as started without starting the syncer routine
 	(s.syncer.(*syncer)).stopped = false
 
@@ -3319,7 +3334,7 @@ func TestEnableDegradedMode(t *testing.T) {
 			for _, eps := range tc.testEndpointSlices {
 				s.endpointSliceLister.Add(eps)
 			}
-			s.svcNegLister.Add(neg)
+			s.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(neg)
 			// mark syncer as started without starting the syncer routine
 			(s.syncer.(*syncer)).stopped = false
 			tc.modify(s)
@@ -3702,12 +3717,13 @@ func TestGetNonDefaultSubnetNEGName(t *testing.T) {
 	for _, testNegType := range testNegTypes {
 		for _, tc := range testCases {
 			t.Run(tc.desc, func(t *testing.T) {
-				_, syncer, err := newTestTransactionSyncer(fakeCloud, testNegType, tc.customNEGName != "")
+				negName := testNegName
+				if tc.customNEGName != "" {
+					negName = tc.customNEGName
+				}
+				_, syncer, err := newTestTransactionSyncerWithNegName(fakeCloud, testNegType, tc.customNEGName != "", negName)
 				if err != nil {
 					t.Fatalf("failed to initialize transaction syncer: %v", err)
-				}
-				if tc.customNEGName != "" {
-					syncer.NegSyncerKey.NegName = tc.customNEGName
 				}
 				got, err := syncer.getNonDefaultSubnetNEGName(additionalTestSubnet)
 				t.Logf("NEG name: %q, custom Name: %v", syncer.NegSyncerKey.NegName, syncer.customName)
@@ -4000,7 +4016,7 @@ func TestSyncL4NEGs(t *testing.T) {
 			for _, eps := range tc.endpointSlices {
 				s.endpointSliceLister.Add(eps)
 			}
-			s.svcNegLister.Add(neg)
+			s.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(neg)
 			// mark syncer as started without starting the syncer routine
 			(s.syncer.(*syncer)).stopped = false
 			// add transactions to the syncer if any were defined in the test case
@@ -4121,29 +4137,38 @@ func TestReAddDrainingEndpointsThatAreInTargetMap(t *testing.T) {
 
 func newTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool) (negtypes.NegSyncer, *transactionSyncer, error) {
 	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil)
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, "")
+}
+
+func newTestTransactionSyncerWithNegName(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, negName string) (negtypes.NegSyncer, *transactionSyncer, error) {
+	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, negName)
 }
 
 func newTestTransactionSyncerWithNetInfo(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, netInfo network.NetworkInfo) (negtypes.NegSyncer, *transactionSyncer, error) {
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil)
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, "")
 }
 
 func newTestTransactionSyncerWithTopologyInformer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, nodeTopologyInformer cache.SharedIndexInformer) (negtypes.NegSyncer, *transactionSyncer, error) {
 	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, nodeTopologyInformer, netInfo, nil)
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, nodeTopologyInformer, netInfo, nil, "")
 }
 
 func newTestTransactionSyncerWithCustomContext(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, customTestContext *negtypes.TestContext) (negtypes.NegSyncer, *transactionSyncer, error) {
 	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, customTestContext)
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, customTestContext, "")
 }
 
-func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, nodeTopologyInformer cache.SharedIndexInformer, netInfo network.NetworkInfo, customTestContext *negtypes.TestContext) (negtypes.NegSyncer, *transactionSyncer, error) {
+func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, nodeTopologyInformer cache.SharedIndexInformer, netInfo network.NetworkInfo, customTestContext *negtypes.TestContext, negName string) (negtypes.NegSyncer, *transactionSyncer, error) {
 	var testContext *negtypes.TestContext
 	if customTestContext != nil {
 		testContext = customTestContext
 	} else {
 		testContext = negtypes.NewTestContext()
+	}
+
+	if negName == "" {
+		negName = testNegName
 	}
 
 	svcPort := negtypes.NegSyncerKey{
@@ -4154,12 +4179,14 @@ func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, 
 			Port:       80,
 			TargetPort: "8080",
 		},
-		NegName: testNegName,
+		NegName: negName,
 	}
 
 	var mode negtypes.EndpointsCalculatorMode
 	if negType == negtypes.VmIpEndpointType {
-		svcPort.NegName = testL4NegName
+		if negName == testNegName {
+			svcPort.NegName = testL4NegName
+		}
 		svcPort.PortTuple.Port = 0
 		svcPort.PortTuple.TargetPort = ""
 		svcPort.PortTuple.Name = string(negtypes.VmIpEndpointType)
@@ -4181,6 +4208,17 @@ func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, 
 		negNamer = testContext.L4Namer
 	}
 
+	statusReporter := statusreporter.NewSvcNegStatusReporter(
+		svcPort.Namespace,
+		svcPort.NegName,
+		testContext.SvcNegClient,
+		testContext.SvcNegInformer.GetIndexer(),
+		fakeZoneGetter,
+		netInfo.SubnetworkURL,
+		testContext.NegMetrics,
+		klog.TODO(),
+	)
+
 	negsyncer := NewTransactionSyncer(svcPort,
 		record.NewFakeRecorder(100),
 		fakeGCE,
@@ -4189,12 +4227,11 @@ func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, 
 		testContext.ServiceInformer.GetIndexer(),
 		testContext.EndpointSliceInformer.GetIndexer(),
 		testContext.NodeInformer.GetIndexer(),
-		testContext.SvcNegInformer.GetIndexer(),
+		statusReporter,
 		reflector,
 		GetEndpointsCalculator(testContext.PodInformer.GetIndexer(), testContext.NodeInformer.GetIndexer(), testContext.ServiceInformer.GetIndexer(),
 			fakeZoneGetter, svcPort, mode, klog.TODO(), testContext.EnableDualStackNEG, metricscollector.FakeSyncerMetrics(), &network.NetworkInfo{IsDefault: true, SubnetworkURL: test.DefaultTestSubnetURL}, negtypes.L4InternalLB, testContext.NegMetrics),
 		string(kubeSystemUID),
-		testContext.SvcNegClient,
 		metricscollector.FakeSyncerMetrics(),
 		customName,
 		klog.TODO(),
@@ -4460,7 +4497,7 @@ func createNegCR(testNegName string, creationTS metav1.Time, populateInitialized
 			Type:               negv1beta1.Initialized,
 			Status:             corev1.ConditionTrue,
 			LastTransitionTime: creationTS,
-			Reason:             negtypes.NegInitializationSuccessful,
+			Reason:             statusreporter.NegInitializationSuccessful,
 		})
 	}
 	if populateSynced {
@@ -4468,7 +4505,7 @@ func createNegCR(testNegName string, creationTS metav1.Time, populateInitialized
 			Type:               negv1beta1.Synced,
 			Status:             corev1.ConditionTrue,
 			LastTransitionTime: creationTS,
-			Reason:             negtypes.NegInitializationSuccessful,
+			Reason:             statusreporter.NegInitializationSuccessful,
 		})
 	}
 

@@ -17,6 +17,8 @@ limitations under the License.
 package types
 
 import (
+	"time"
+
 	nodetopologyv1 "github.com/GoogleCloudPlatform/gke-networking-api/apis/nodetopology/v1"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	compute "google.golang.org/api/compute/v1"
@@ -35,8 +37,6 @@ type ZoneGetter interface {
 	IsNodeSelectedByFilter(node *apiv1.Node, filter zonegetter.Filter, filterLogger klog.Logger) bool
 	ListSubnets(logger klog.Logger) []nodetopologyv1.SubnetConfig
 }
-
-
 
 // NetworkEndpointGroupCloud is an interface for managing gce network endpoint group.
 type NetworkEndpointGroupCloud interface {
@@ -107,4 +107,20 @@ type NetworkEndpointsCalculator interface {
 	Mode() EndpointsCalculatorMode
 	// ValidateEndpoints validates the NEG endpoint information is correct
 	ValidateEndpoints(endpointData []EndpointsData, endpointPodMap EndpointPodMap, endpointsExcludedInCalculation int) error
+}
+
+// StatusReporter defines interfaces for reporting NEG syncer status.
+type StatusReporter interface {
+	// SyncFinished reports the result of a sync operation.
+	// It returns true if the syncer needs to re-initialize NEGs on next sync.
+	SyncFinished(syncErr error) (bool, error)
+
+	// NEGsEnsured reports the status after NEGs are ensured.
+	NEGsEnsured(negs []*composite.NetworkEndpointGroup, errList []error) error
+
+	// NetworkEndpointGroups returns the list of NEGs currently reported in status.
+	NetworkEndpointGroups() ([]*composite.NetworkEndpointGroup, error)
+
+	// LastSyncTime returns the last time the NEG syncer synced associated NEGs.
+	LastSyncTime() (time.Time, error)
 }

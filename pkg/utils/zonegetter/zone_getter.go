@@ -235,7 +235,6 @@ func (z *ZoneGetter) ListZonesForSubnet(filter Filter, subnet string, logger klo
 	return z.ListZones(filter, logger)
 }
 
-
 func (z *ZoneGetter) listZones(filter Filter, defaultSubnetOnly bool, logger klog.Logger) ([]string, error) {
 	if z.mode == NonGCP {
 		logger.V(4).Info("ZoneGetter in non-gcp mode, return the single stored zone", "zone", z.singleStoredZone)
