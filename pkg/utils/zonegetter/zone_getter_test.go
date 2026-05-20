@@ -1567,3 +1567,63 @@ func TestLegacyListSubnets(t *testing.T) {
 		t.Errorf("In legacy mode, ListSubnets() returned %d, expected 0 subnets", len(subnets))
 	}
 }
+
+func TestListZonesForSubnet(t *testing.T) {
+	t.Parallel()
+
+	nodeInformer := FakeNodeInformer()
+	PopulateFakeNodeInformer(nodeInformer, false)
+	zoneGetter, err := NewFakeZoneGetter(nodeInformer, FakeNodeTopologyInformer(), defaultTestSubnetURL, false)
+	if err != nil {
+		t.Fatalf("failed to initialize zone getter")
+	}
+	testCases := []struct {
+		desc      string
+		filter    Filter
+		subnet    string
+		expectLen int
+	}{
+		{
+			desc:      "List with AllNodesFilter, default subnet",
+			filter:    AllNodesFilter,
+			subnet:    "default",
+			expectLen: 4,
+		},
+		{
+			desc:      "List with AllNodesFilter, non-default subnet",
+			filter:    AllNodesFilter,
+			subnet:    "non-default",
+			expectLen: 4,
+		},
+		{
+			desc:      "List with CandidateNodesFilter, default subnet",
+			filter:    CandidateNodesFilter,
+			subnet:    "default",
+			expectLen: 3,
+		},
+		{
+			desc:      "List with CandidateAndUnreadyNodesFilter, default subnet",
+			filter:    CandidateAndUnreadyNodesFilter,
+			subnet:    "default",
+			expectLen: 3,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			for _, enableMultiSubnetCluster := range []bool{true, false} {
+				zoneGetter.onlyIncludeDefaultSubnetNodes = enableMultiSubnetCluster
+				zones, _ := zoneGetter.ListZonesForSubnet(tc.filter, tc.subnet, klog.TODO())
+				if len(zones) != tc.expectLen {
+					t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, got %d zones, want %d zones", tc.desc, enableMultiSubnetCluster, len(zones), tc.expectLen)
+				}
+				for _, zone := range zones {
+					if zone == EmptyZone {
+						t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, got an empty zone,", tc.desc, enableMultiSubnetCluster)
+					}
+				}
+			}
+		})
+	}
+}
+

@@ -43,7 +43,7 @@ import (
 // nodes - node10, node 11 ... node45 will be part of the subset.
 type LocalL4EndpointsCalculator struct {
 	nodeLister      listers.NodeLister
-	zoneGetter      *zonegetter.ZoneGetter
+	zoneGetter      types.ZoneGetter
 	subsetSizeLimit int
 	svcId           string
 	logger          klog.Logger
@@ -51,7 +51,7 @@ type LocalL4EndpointsCalculator struct {
 	negMetrics      *metrics.NegMetrics
 }
 
-func NewLocalL4EndpointsCalculator(nodeLister listers.NodeLister, zoneGetter *zonegetter.ZoneGetter, svcId string, logger klog.Logger, networkInfo *network.NetworkInfo, lbType types.L4LBType, negMetrics *metrics.NegMetrics) *LocalL4EndpointsCalculator {
+func NewLocalL4EndpointsCalculator(nodeLister listers.NodeLister, zoneGetter types.ZoneGetter, svcId string, logger klog.Logger, networkInfo *network.NetworkInfo, lbType types.L4LBType, negMetrics *metrics.NegMetrics) *LocalL4EndpointsCalculator {
 	subsetSize := maxSubsetSizeLocal
 	if lbType == types.L4ExternalLB {
 		subsetSize = maxSubsetSizeNetLBLocal
@@ -154,7 +154,7 @@ func (l *LocalL4EndpointsCalculator) ValidateEndpoints(endpointData []types.Endp
 // mode) are selected.
 type ClusterL4EndpointsCalculator struct {
 	// zoneGetter looks up the zone for a given node when calculating subsets.
-	zoneGetter *zonegetter.ZoneGetter
+	zoneGetter types.ZoneGetter
 	// subsetSizeLimit is the max value of the subset size in this mode.
 	subsetSizeLimit int
 	// svcId is the unique identifier for the service, that is used as a salt when hashing nodenames.
@@ -168,7 +168,7 @@ type ClusterL4EndpointsCalculator struct {
 	negMetrics *metrics.NegMetrics
 }
 
-func NewClusterL4EndpointsCalculator(nodeLister listers.NodeLister, zoneGetter *zonegetter.ZoneGetter, svcId string, logger klog.Logger, networkInfo *network.NetworkInfo, l4LBtype types.L4LBType, negMetrics *metrics.NegMetrics) *ClusterL4EndpointsCalculator {
+func NewClusterL4EndpointsCalculator(nodeLister listers.NodeLister, zoneGetter types.ZoneGetter, svcId string, logger klog.Logger, networkInfo *network.NetworkInfo, l4LBtype types.L4LBType, negMetrics *metrics.NegMetrics) *ClusterL4EndpointsCalculator {
 	subsetSize := maxSubsetSizeDefault
 	if l4LBtype == types.L4ExternalLB {
 		subsetSize = maxSubsetSizeNetLBCluster
@@ -315,7 +315,7 @@ func (l *ClusterL4EndpointsCalculator) ValidateEndpoints(endpointData []types.En
 
 // L7EndpointsCalculator implements methods to calculate Network endpoints for VM_IP_PORT NEGs
 type L7EndpointsCalculator struct {
-	zoneGetter               *zonegetter.ZoneGetter
+	zoneGetter               types.ZoneGetter
 	servicePortName          string
 	podLister                cache.Indexer
 	nodeLister               cache.Indexer
@@ -329,7 +329,7 @@ type L7EndpointsCalculator struct {
 	negMetrics               *metrics.NegMetrics
 }
 
-func NewL7EndpointsCalculator(zoneGetter *zonegetter.ZoneGetter, podLister, nodeLister, serviceLister cache.Indexer, syncerKey types.NegSyncerKey, logger klog.Logger, enableDualStackNEG bool, syncMetricsCollector *metricscollector.SyncerMetrics, negMetrics *metrics.NegMetrics) *L7EndpointsCalculator {
+func NewL7EndpointsCalculator(zoneGetter types.ZoneGetter, podLister, nodeLister, serviceLister cache.Indexer, syncerKey types.NegSyncerKey, logger klog.Logger, enableDualStackNEG bool, syncMetricsCollector *metricscollector.SyncerMetrics, negMetrics *metrics.NegMetrics) *L7EndpointsCalculator {
 	return &L7EndpointsCalculator{
 		zoneGetter:               zoneGetter,
 		servicePortName:          syncerKey.PortTuple.Name,

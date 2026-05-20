@@ -301,10 +301,10 @@ func TestTransactionSyncNetworkEndpointsMSC(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to initialize transaction syncer: %v", err)
 		}
-		if err := zonegetter.AddNodeTopologyCR(transactionSyncer.zoneGetter, &nodeTopologyCrWithAdditionalSubnets); err != nil {
+		if err := zonegetter.AddNodeTopologyCR(transactionSyncer.zoneGetter.(*zonegetter.ZoneGetter), &nodeTopologyCrWithAdditionalSubnets); err != nil {
 			t.Fatalf("Failed to add node topology CR: %v", err)
 		}
-		zonegetter.SetNodeTopologyHasSynced(transactionSyncer.zoneGetter, func() bool { return true })
+		zonegetter.SetNodeTopologyHasSynced(transactionSyncer.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 		nonDefaultNegName, err := transactionSyncer.getNonDefaultSubnetNEGName(additionalTestSubnet)
 		if err != nil {
 			t.Fatalf("Failed to get non-default subnet NEG name: %v", err)
@@ -2048,7 +2048,7 @@ func TestEnsureNetworkEndpointGroupsMSC(t *testing.T) {
 			if tc.customNEGName != "" {
 				syncer.NegSyncerKey.NegName = tc.customNEGName
 			}
-			zonegetter.SetNodeTopologyHasSynced(syncer.zoneGetter, func() bool { return true })
+			zonegetter.SetNodeTopologyHasSynced(syncer.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 
 			negName := syncer.NegSyncerKey.NegName
 
@@ -2083,7 +2083,7 @@ func TestEnsureNetworkEndpointGroupsMSC(t *testing.T) {
 			syncer.svcNegLister.Add(initialNegCr)
 
 			if tc.nodeTopologyCr != nil {
-				if err := zonegetter.AddNodeTopologyCR(syncer.zoneGetter, tc.nodeTopologyCr); err != nil {
+				if err := zonegetter.AddNodeTopologyCR(syncer.zoneGetter.(*zonegetter.ZoneGetter), tc.nodeTopologyCr); err != nil {
 					t.Fatalf("Failed to create Node Topology CR: %v", err)
 				}
 			}
@@ -2192,7 +2192,7 @@ func TestUpdateInitStatusWithMultiSubnetCluster(t *testing.T) {
 			fakeCloud := negtypes.NewFakeNetworkEndpointGroupCloud(defaultTestSubnetURL, testNetwork)
 			nodeTopologyInformer := zonegetter.FakeNodeTopologyInformer()
 			_, syncer, err := newTestTransactionSyncerWithTopologyInformer(fakeCloud, testNegType, false, nodeTopologyInformer)
-			zonegetter.SetNodeTopologyHasSynced(syncer.zoneGetter, func() bool { return true })
+			zonegetter.SetNodeTopologyHasSynced(syncer.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 			if err != nil {
 				t.Fatalf("failed to initialize transaction syncer: %v", err)
 			}
@@ -2315,7 +2315,7 @@ func TestUpdateInitStatusTransitions(t *testing.T) {
 	fakeCloud := negtypes.NewFakeNetworkEndpointGroupCloud(defaultTestSubnetURL, testNetwork)
 	nodeTopologyInformer := zonegetter.FakeNodeTopologyInformer()
 	_, syncer, err := newTestTransactionSyncerWithTopologyInformer(fakeCloud, testNegType, false, nodeTopologyInformer)
-	zonegetter.SetNodeTopologyHasSynced(syncer.zoneGetter, func() bool { return true })
+	zonegetter.SetNodeTopologyHasSynced(syncer.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 	if err != nil {
 		t.Fatalf("failed to initialize transaction syncer: %v", err)
 	}
@@ -2419,7 +2419,7 @@ func TestSubnetChanges(t *testing.T) {
 	// mark syncer as started without starting the syncer routine
 	(ts.syncer.(*syncer)).stopped = false
 	ts.needInit = false
-	zonegetter.SetNodeTopologyHasSynced(ts.zoneGetter, func() bool { return true })
+	zonegetter.SetNodeTopologyHasSynced(ts.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 
 	svcNegClient := ts.svcNegClient
 	currentSubnets := []nodetopologyv1.SubnetConfig{defaultSubnetConfig}
@@ -2572,7 +2572,7 @@ func TestIsSubnetChange(t *testing.T) {
 
 			ts.zoneGetter = fakeZoneGetter
 			//Make sure NodeTopologyInformer is considered as synced, otherwise only defaultSubnet is returned
-			zonegetter.SetNodeTopologyHasSynced(ts.zoneGetter, func() bool { return true })
+			zonegetter.SetNodeTopologyHasSynced(ts.zoneGetter.(*zonegetter.ZoneGetter), func() bool { return true })
 			origZones, err := fakeZoneGetter.ListZones(negtypes.NodeFilterForEndpointCalculatorMode(ts.EpCalculatorMode), klog.TODO())
 			if err != nil {
 				t.Errorf("errored when retrieving zones: %s", err)
@@ -2855,7 +2855,7 @@ func TestIsZoneChange(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to initialize transaction syncer: %v", err)
 			}
-			fakeZoneGetter := syncer.zoneGetter
+			fakeZoneGetter := syncer.zoneGetter.(*zonegetter.ZoneGetter)
 			origZones, err := fakeZoneGetter.ListZones(negtypes.NodeFilterForEndpointCalculatorMode(syncer.EpCalculatorMode), klog.TODO())
 			if err != nil {
 				t.Errorf("errored when retrieving zones: %s", err)

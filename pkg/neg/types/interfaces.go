@@ -17,12 +17,26 @@ limitations under the License.
 package types
 
 import (
+	nodetopologyv1 "github.com/GoogleCloudPlatform/gke-networking-api/apis/nodetopology/v1"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	compute "google.golang.org/api/compute/v1"
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/ingress-gce/pkg/composite"
 	"k8s.io/ingress-gce/pkg/utils/namer"
+	"k8s.io/ingress-gce/pkg/utils/zonegetter"
 	"k8s.io/klog/v2"
 )
+
+// ZoneGetter is an interface for looking up zone and subnet information for nodes.
+type ZoneGetter interface {
+	ListZonesForSubnet(filter zonegetter.Filter, subnet string, logger klog.Logger) ([]string, error)
+	ListNodes(filter zonegetter.Filter, logger klog.Logger) ([]*apiv1.Node, error)
+	ZoneAndSubnetForNode(name string, logger klog.Logger) (string, string, error)
+	IsNodeSelectedByFilter(node *apiv1.Node, filter zonegetter.Filter, filterLogger klog.Logger) bool
+	ListSubnets(logger klog.Logger) []nodetopologyv1.SubnetConfig
+}
+
+
 
 // NetworkEndpointGroupCloud is an interface for managing gce network endpoint group.
 type NetworkEndpointGroupCloud interface {

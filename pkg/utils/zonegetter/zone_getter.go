@@ -229,6 +229,13 @@ func (z *ZoneGetter) ListZonesInDefaultSubnet(filter Filter, logger klog.Logger)
 	return z.listZones(filter, true, logger)
 }
 
+// ListZonesForSubnet returns a list of zones containing nodes in the given subnet that satisfy the given node filtering mode.
+// For now, it ignores the subnet argument and returns all zones.
+func (z *ZoneGetter) ListZonesForSubnet(filter Filter, subnet string, logger klog.Logger) ([]string, error) {
+	return z.ListZones(filter, logger)
+}
+
+
 func (z *ZoneGetter) listZones(filter Filter, defaultSubnetOnly bool, logger klog.Logger) ([]string, error) {
 	if z.mode == NonGCP {
 		logger.V(4).Info("ZoneGetter in non-gcp mode, return the single stored zone", "zone", z.singleStoredZone)
