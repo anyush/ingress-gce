@@ -722,6 +722,10 @@ func podBelongsToService(pod *apiv1.Pod, service *apiv1.Service) error {
 
 // retrieveExistingZoneNetworkEndpointMap lists existing network endpoints in the neg and return the zone and endpoints map.
 func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string, zoneGetter negtypes.ZoneGetter, cloud negtypes.NetworkEndpointGroupCloud, version meta.Version, mode negtypes.EndpointsCalculatorMode, enableDualStackNEG bool, logger klog.Logger, negMetrics *metrics.NegMetrics, retrieveDrainStatus bool) (map[negtypes.NEGLocation]negtypes.NetworkEndpointSet, labels.EndpointPodLabelMap, map[negtypes.NetworkEndpoint]string, error) {
+	return retrieveExistingZoneNetworkEndpointMapWithLimit(subnetToNegMapping, zoneGetter, cloud, version, mode, enableDualStackNEG, logger, negMetrics, retrieveDrainStatus, nil)
+}
+
+func retrieveExistingZoneNetworkEndpointMapWithLimit(subnetToNegMapping map[string]string, zoneGetter negtypes.ZoneGetter, cloud negtypes.NetworkEndpointGroupCloud, version meta.Version, mode negtypes.EndpointsCalculatorMode, enableDualStackNEG bool, logger klog.Logger, negMetrics *metrics.NegMetrics, retrieveDrainStatus bool, limitToLocations sets.Set[negtypes.NEGLocation]) (map[negtypes.NEGLocation]negtypes.NetworkEndpointSet, labels.EndpointPodLabelMap, map[negtypes.NetworkEndpoint]string, error) {
 	zoneNetworkEndpointMap := map[negtypes.NEGLocation]negtypes.NetworkEndpointSet{}
 	endpointPodLabelMap := labels.EndpointPodLabelMap{}
 	drainingEndpoints := make(map[negtypes.NetworkEndpoint]string)
@@ -738,6 +742,13 @@ func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string
 		candidateZonesMap := sets.NewString(candidateNodeZones...)
 
 		for _, zone := range zones {
+			loc := negtypes.NEGLocation{Zone: zone, Subnet: subnet}
+			if limitToLocations != nil {
+				if !limitToLocations.Has(loc) {
+					logger.Info("Skipping retrieving endpoints for NEG location not in limit list", "location", loc)
+					continue
+				}
+			}
 			networkEndpointsWithHealthStatus, err := cloud.ListNetworkEndpoints(negName, zone, retrieveDrainStatus, version, logger)
 			if err != nil {
 				// It is possible for a NEG to be missing in a zone without candidate nodes. Log and ignore this error.
@@ -749,7 +760,7 @@ func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string
 				}
 				return nil, nil, nil, fmt.Errorf("failed to lookup NEG in zone %q, candidate zones %v, err - %w", zone, candidateZonesMap, err)
 			}
-			zoneNetworkEndpointMap[negtypes.NEGLocation{Zone: zone, Subnet: subnet}] = negtypes.NewNetworkEndpointSet()
+			zoneNetworkEndpointMap[loc] = negtypes.NewNetworkEndpointSet()
 			for _, ne := range networkEndpointsWithHealthStatus {
 
 				newNE := negtypes.NetworkEndpoint{IP: ne.NetworkEndpoint.IpAddress, Node: ne.NetworkEndpoint.Instance}
@@ -759,7 +770,7 @@ func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string
 				if enableDualStackNEG {
 					newNE.IPv6 = parseIPAddress(ne.NetworkEndpoint.Ipv6Address)
 				}
-				zoneNetworkEndpointMap[negtypes.NEGLocation{Zone: zone, Subnet: subnet}].Insert(newNE)
+				zoneNetworkEndpointMap[loc].Insert(newNE)
 				endpointPodLabelMap[newNE] = ne.NetworkEndpoint.Annotations
 				if retrieveDrainStatus && healthStatusIndicatesDraining(ne) {
 					drainingEndpoints[newNE] = ne.Healths[0].HealthState

@@ -274,23 +274,42 @@ func (s *transactionSyncer) syncInternalImpl() error {
 	// Only matters for L4 Local mode.
 	needInitDrainStatus := s.needInit && s.enableL4NEGDetachCancel && s.endpointsCalculator.Mode() == negtypes.L4LocalMode
 
+	subnetConfigs := s.zoneGetter.ListSubnets(s.logger)
+
+	var ensuredLocations sets.Set[negtypes.NEGLocation]
+	var ensureErr error
 	if s.needInit || zoneChange || subnetChange {
 		s.logger.Info("Need to ensure network endpoint groups", "needInit", s.needInit, "zoneChange", zoneChange, "subnetChange", subnetChange)
-		if err := s.ensureNetworkEndpointGroups(); err != nil {
-			return fmt.Errorf("%w: %v", negtypes.ErrNegNotFound, err)
+		ensuredLocations, ensureErr = s.ensureNetworkEndpointGroups()
+		if ensureErr != nil {
+			if ensuredLocations.Len() == 0 {
+				return fmt.Errorf("%w: %v", negtypes.ErrNegNotFound, ensureErr)
+			}
+			s.logger.Error(ensureErr, "Some NEGs failed to be ensured, proceeding with successful ones", "successfulCount", ensuredLocations.Len())
 		}
 		s.needInit = false
+	} else {
+		// Populate ensuredLocations with all expected locations if ensure is skipped
+		ensuredLocations = sets.New[negtypes.NEGLocation]()
+		for _, subnetConfig := range subnetConfigs {
+			zones, err := s.zoneGetter.ListZonesForSubnet(negtypes.NodeFilterForEndpointCalculatorMode(s.endpointsCalculator.Mode()), subnetConfig.Name, s.logger)
+			if err != nil {
+				return err
+			}
+			for _, zone := range zones {
+				ensuredLocations.Insert(negtypes.NEGLocation{Zone: zone, Subnet: subnetConfig.Name})
+			}
+		}
 	}
 	s.logger.V(2).Info("Sync NEG", "negSyncerKey", s.NegSyncerKey.String(), "endpointsCalculatorMode", s.endpointsCalculator.Mode())
 
-	subnetConfigs := s.zoneGetter.ListSubnets(s.logger)
 	subnetToNegMapping, err := s.generateSubnetToNegNameMap(subnetConfigs)
 	if err != nil {
 		s.logger.Error(err, "failed to generate subnet to neg name mapping")
 		return err
 	}
 
-	currentMap, currentPodLabelMap, drainingEndpoints, err := retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, s.zoneGetter, s.cloud, s.NegSyncerKey.GetAPIVersion(), s.endpointsCalculator.Mode(), s.enableDualStackNEG, s.logger, s.negMetrics, needInitDrainStatus)
+	currentMap, currentPodLabelMap, drainingEndpoints, err := retrieveExistingZoneNetworkEndpointMapWithLimit(subnetToNegMapping, s.zoneGetter, s.cloud, s.NegSyncerKey.GetAPIVersion(), s.endpointsCalculator.Mode(), s.enableDualStackNEG, s.logger, s.negMetrics, needInitDrainStatus, ensuredLocations)
 	if err != nil {
 		return fmt.Errorf("%w: %w", negtypes.ErrCurrentNegEPNotFound, err)
 	}
@@ -363,6 +382,14 @@ func (s *transactionSyncer) syncInternalImpl() error {
 		}
 		s.resetErrorState()
 	}
+	if ensuredLocations != nil {
+		for loc := range targetMap {
+			if _, ok := ensuredLocations[loc]; !ok {
+				s.logger.Info("Excluding target endpoints for failed NEG location", "location", loc)
+				delete(targetMap, loc)
+			}
+		}
+	}
 	s.logStats(targetMap, "desired NEG endpoints")
 
 	// Calculate the endpoints to add and delete to transform the current state to desire state
@@ -404,14 +431,23 @@ func (s *transactionSyncer) syncInternalImpl() error {
 		s.commitPods(committedEndpoints, endpointPodMap)
 	}
 
+	var syncErr error
 	if len(addEndpoints) == 0 && len(removeEndpoints) == 0 {
 		s.logger.V(3).Info("No endpoint change. Skip syncing NEG. ", s.Namespace, s.Name)
-		return nil
+		syncErr = nil
+	} else {
+		s.logEndpoints(addEndpoints, "adding endpoint")
+		s.logEndpoints(removeEndpoints, "removing endpoint")
+		syncErr = s.syncNetworkEndpoints(addEndpoints, removeEndpoints, endpointPodLabelMap, migrationZone)
 	}
-	s.logEndpoints(addEndpoints, "adding endpoint")
-	s.logEndpoints(removeEndpoints, "removing endpoint")
 
-	return s.syncNetworkEndpoints(addEndpoints, removeEndpoints, endpointPodLabelMap, migrationZone)
+	if ensureErr != nil {
+		if syncErr != nil {
+			return utilerrors.NewAggregate([]error{ensureErr, syncErr})
+		}
+		return ensureErr
+	}
+	return syncErr
 }
 
 // reAddDrainingEndpointsThatAreInTargetMap will make sure that endpoints that are draining
@@ -506,17 +542,18 @@ func (s *transactionSyncer) resetErrorState() {
 }
 
 // ensureNetworkEndpointGroups ensures NEGs are created and configured correctly in the corresponding zones.
-func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
+func (s *transactionSyncer) ensureNetworkEndpointGroups() (sets.Set[negtypes.NEGLocation], error) {
 	var errList []error
 	var negObjs []*composite.NetworkEndpointGroup
 	updateNEGStatus := true
 	negsByLocation := make(map[string]int)
+	ensuredLocations := sets.New[negtypes.NEGLocation]()
 
 	// Get default subnet from syncer's networkInfo.
 	defaultSubnet, err := utils.KeyName(s.networkInfo.SubnetworkURL)
 	if err != nil {
 		s.logger.Error(err, "Errored getting default subnet from NetworkInfo when ensuring NEGs")
-		return err
+		return ensuredLocations, err
 	}
 
 	var subnetConfigs []nodetopologyv1.SubnetConfig
@@ -535,7 +572,7 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 
 		subnetConfig, err := nodetopology.SubnetConfigFromSubnetURL(s.networkInfo.SubnetworkURL)
 		if err != nil {
-			return err
+			return ensuredLocations, err
 		}
 		subnetConfigs = []nodetopologyv1.SubnetConfig{subnetConfig}
 	}
@@ -612,6 +649,7 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 				}
 			}
 			if err != nil {
+				s.logger.Error(err, "Failed to ensure NEG", "negName", negName, "zone", zone)
 				errList = append(errList, err)
 				// Do not modify NEG Status if there is conflict within the same cluster
 				// and namespace because the CR is owned by a different syncer.
@@ -624,6 +662,8 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 			if err == nil {
 				negObjs = append(negObjs, negObj)
 				negsByLocation[zone]++
+				loc := negtypes.NEGLocation{Zone: zone, Subnet: subnetConfig.Name}
+				ensuredLocations.Insert(loc)
 			}
 		}
 	}
@@ -635,7 +675,7 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 	}
 
 	s.syncMetricsCollector.UpdateSyncerNegCount(s.NegSyncerKey, negsByLocation)
-	return utilerrors.NewAggregate(errList)
+	return ensuredLocations, utilerrors.NewAggregate(errList)
 }
 
 // syncNetworkEndpoints spins off go routines to execute NEG operations

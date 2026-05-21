@@ -96,7 +96,7 @@ func TestTransactionSyncNetworkEndpoints(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to initialize transaction syncer: %v", err)
 		}
-		if err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
+		if _, err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
 			t.Errorf("Expect error == nil, but got %v", err)
 		}
 		var targetPort string
@@ -311,7 +311,7 @@ func TestTransactionSyncNetworkEndpointsMSC(t *testing.T) {
 			t.Fatalf("Failed to get non-default subnet NEG name: %v", err)
 		}
 
-		if err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
+		if _, err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
 			t.Errorf("Expect error == nil, but got %v", err)
 		}
 		var targetPort string
@@ -527,7 +527,7 @@ func TestNegNameMultiNetworking(t *testing.T) {
 
 	// Start syncer without starting syncer goroutine
 	(transactionSyncer.syncer.(*syncer)).stopped = false
-	if err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
+	if _, err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
 		t.Errorf("Expect error == nil, but got %v", err)
 	}
 
@@ -732,7 +732,7 @@ func TestSyncNetworkEndpointLabel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to initialize transaction syncer: %v", err)
 		}
-		if err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
+		if _, err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
 			t.Errorf("Expect error == nil, but got %v", err)
 		}
 		err = transactionSyncer.syncNetworkEndpoints(tc.addEndpoints, map[negtypes.NEGLocation]negtypes.NetworkEndpointSet{}, tc.endpointPodLabelMap, negtypes.NEGLocation{})
@@ -1845,7 +1845,7 @@ func TestTransactionSyncerWithNegCR(t *testing.T) {
 			}
 			syncer.statusReporter.(*statusreporter.SvcNegStatusReporter).SvcNegLister.Add(neg)
 
-			err = syncer.ensureNetworkEndpointGroups()
+			_, err = syncer.ensureNetworkEndpointGroups()
 			if !tc.expectErr && err != nil {
 				t.Errorf("Expected no error, but got: %v", err)
 			}
@@ -2090,7 +2090,7 @@ func TestEnsureNetworkEndpointGroupsMSC(t *testing.T) {
 				}
 			}
 
-			err = syncer.ensureNetworkEndpointGroups()
+			_, err = syncer.ensureNetworkEndpointGroups()
 
 			if tc.expectError && err == nil {
 				t.Errorf("Got no errors after ensureNetworkEndpointGroupsFromNodeTopology(), expected errors")
@@ -4672,7 +4672,7 @@ func TestEnsureNetworkEndpointGroupsLifecycleNotManaged(t *testing.T) {
 		t.Fatalf("failed to initialize transaction syncer: %v", err)
 	}
 
-	err = syncer.ensureNetworkEndpointGroups()
+	_, err = syncer.ensureNetworkEndpointGroups()
 	if err == nil {
 		t.Errorf("Expected error because NEG does not exist and lifecycleManaged=false, but got nil")
 	}
@@ -4690,7 +4690,7 @@ func TestEnsureNetworkEndpointGroupsLifecycleNotManaged(t *testing.T) {
 		t.Fatalf("Failed to create NEG in fake GCE: %v", err)
 	}
 
-	err = syncer.ensureNetworkEndpointGroups()
+	_, err = syncer.ensureNetworkEndpointGroups()
 	if err == nil {
 		t.Errorf("Expected error because NEG network is mismatched and lifecycleManaged=false, but got nil")
 	}
@@ -4722,7 +4722,7 @@ func TestEnsureNetworkEndpointGroupsLifecycleNotManaged(t *testing.T) {
 		}
 	}
 
-	err = syncer.ensureNetworkEndpointGroups()
+	_, err = syncer.ensureNetworkEndpointGroups()
 	if err != nil {
 		t.Errorf("Expected nil error because NEG exists in all zones and is correct, but got: %v", err)
 	}
