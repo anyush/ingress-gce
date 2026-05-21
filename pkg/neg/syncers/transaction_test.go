@@ -4137,29 +4137,29 @@ func TestReAddDrainingEndpointsThatAreInTargetMap(t *testing.T) {
 
 func newTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool) (negtypes.NegSyncer, *transactionSyncer, error) {
 	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, "")
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, "", true)
 }
 
 func newTestTransactionSyncerWithNegName(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, negName string) (negtypes.NegSyncer, *transactionSyncer, error) {
 	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, negName)
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, negName, true)
 }
 
 func newTestTransactionSyncerWithNetInfo(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, netInfo network.NetworkInfo) (negtypes.NegSyncer, *transactionSyncer, error) {
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, "")
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, nil, "", true)
 }
 
 func newTestTransactionSyncerWithTopologyInformer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, nodeTopologyInformer cache.SharedIndexInformer) (negtypes.NegSyncer, *transactionSyncer, error) {
 	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, nodeTopologyInformer, netInfo, nil, "")
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, nodeTopologyInformer, netInfo, nil, "", true)
 }
 
 func newTestTransactionSyncerWithCustomContext(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, customTestContext *negtypes.TestContext) (negtypes.NegSyncer, *transactionSyncer, error) {
 	netInfo := network.NetworkInfo{IsDefault: true, NetworkURL: fakeGCE.NetworkURL(), SubnetworkURL: fakeGCE.SubnetworkURL()}
-	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, customTestContext, "")
+	return newCustomTestTransactionSyncer(fakeGCE, negType, customName, zonegetter.FakeNodeTopologyInformer(), netInfo, customTestContext, "", true)
 }
 
-func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, nodeTopologyInformer cache.SharedIndexInformer, netInfo network.NetworkInfo, customTestContext *negtypes.TestContext, negName string) (negtypes.NegSyncer, *transactionSyncer, error) {
+func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, negType negtypes.NetworkEndpointType, customName bool, nodeTopologyInformer cache.SharedIndexInformer, netInfo network.NetworkInfo, customTestContext *negtypes.TestContext, negName string, lifecycleManaged bool) (negtypes.NegSyncer, *transactionSyncer, error) {
 	var testContext *negtypes.TestContext
 	if customTestContext != nil {
 		testContext = customTestContext
@@ -4234,6 +4234,7 @@ func newCustomTestTransactionSyncer(fakeGCE negtypes.NetworkEndpointGroupCloud, 
 		string(kubeSystemUID),
 		metricscollector.FakeSyncerMetrics(),
 		customName,
+		lifecycleManaged,
 		klog.TODO(),
 		labels.PodLabelPropagationConfig{},
 		testContext.EnableDualStackNEG,
@@ -4650,4 +4651,79 @@ func generateExpectedNegObjReferences(t *testing.T, cloud negtypes.NetworkEndpoi
 	}
 
 	return expectedNegRefs
+}
+
+func TestEnsureNetworkEndpointGroupsLifecycleNotManaged(t *testing.T) {
+	t.Parallel()
+
+	testNetworkURL := "https://www.googleapis.com/compute/v1/projects/test-project/global/networks/default"
+	testSubnetworkURL := "https://www.googleapis.com/compute/v1/projects/test-project/regions/us-central1/subnetworks/default"
+
+	fakeGCE := gce.NewFakeGCECloud(test.DefaultTestClusterValues())
+	negtypes.MockNetworkEndpointAPIs(fakeGCE)
+	// Create adapter with explicit valid URLs
+	fakeCloud := negtypes.NewAdapterWithNetwork(fakeGCE, testNetworkURL, testSubnetworkURL, negtypes.NewTestContext().NegMetrics)
+
+	networkInfo := network.NetworkInfo{IsDefault: true, NetworkURL: testNetworkURL, SubnetworkURL: testSubnetworkURL}
+
+	// Case 1: NEG does not exist in GCE. Should return error.
+	_, syncer, err := newCustomTestTransactionSyncer(fakeCloud, negtypes.VmIpPortEndpointType, false, zonegetter.FakeNodeTopologyInformer(), networkInfo, nil, "test-neg-lifecycle", false)
+	if err != nil {
+		t.Fatalf("failed to initialize transaction syncer: %v", err)
+	}
+
+	err = syncer.ensureNetworkEndpointGroups()
+	if err == nil {
+		t.Errorf("Expected error because NEG does not exist and lifecycleManaged=false, but got nil")
+	}
+
+	// Case 2: NEG exists but network is mismatched. Should return error.
+	// Create NEG in fake GCE with mismatched network in zone1
+	err = fakeCloud.CreateNetworkEndpointGroup(&composite.NetworkEndpointGroup{
+		Version:             syncer.NegSyncerKey.GetAPIVersion(),
+		Name:                "test-neg-lifecycle",
+		NetworkEndpointType: string(syncer.NegSyncerKey.NegType),
+		Network:             "mismatched-network", // mismatched
+		Subnetwork:          testSubnetworkURL,
+	}, negtypes.TestZone1, klog.TODO())
+	if err != nil {
+		t.Fatalf("Failed to create NEG in fake GCE: %v", err)
+	}
+
+	err = syncer.ensureNetworkEndpointGroups()
+	if err == nil {
+		t.Errorf("Expected error because NEG network is mismatched and lifecycleManaged=false, but got nil")
+	}
+
+	// Clean up mismatched NEG
+	fakeCloud.DeleteNetworkEndpointGroup("test-neg-lifecycle", negtypes.TestZone1, syncer.NegSyncerKey.GetAPIVersion(), klog.TODO())
+
+	// Case 3: NEG exists in all expected zones and is correct. Should succeed.
+	// Expected zones are TestZone1, TestZone2, TestZone4 (for VmIpPortEndpointType in default fake zone getter)
+	expectedZones := []string{negtypes.TestZone1, negtypes.TestZone2, negtypes.TestZone4}
+	desc := utils.NegDescription{
+		ClusterUID:  string(kubeSystemUID),
+		Namespace:   testServiceNamespace,
+		ServiceName: testServiceName,
+		Port:        fmt.Sprint(syncer.NegSyncerKey.PortTuple.Port),
+	}
+
+	for _, zone := range expectedZones {
+		err = fakeCloud.CreateNetworkEndpointGroup(&composite.NetworkEndpointGroup{
+			Version:             syncer.NegSyncerKey.GetAPIVersion(),
+			Name:                "test-neg-lifecycle",
+			NetworkEndpointType: string(syncer.NegSyncerKey.NegType),
+			Network:             testNetworkURL,
+			Subnetwork:          testSubnetworkURL,
+			Description:         desc.String(),
+		}, zone, klog.TODO())
+		if err != nil {
+			t.Fatalf("Failed to create NEG in fake GCE for zone %s: %v", zone, err)
+		}
+	}
+
+	err = syncer.ensureNetworkEndpointGroups()
+	if err != nil {
+		t.Errorf("Expected nil error because NEG exists in all zones and is correct, but got: %v", err)
+	}
 }

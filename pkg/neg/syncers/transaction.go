@@ -95,6 +95,9 @@ type transactionSyncer struct {
 	// customName indicates whether the NEG name is a generated one or custom one
 	customName bool
 
+	// lifecycleManaged indicates whether the syncer manages the lifecycle of the GCE NEGs (create/delete)
+	lifecycleManaged bool
+
 	logger klog.Logger
 
 	// errorState indicates if the syncer is in any of 4 error scenarios
@@ -150,6 +153,7 @@ func NewTransactionSyncer(
 	kubeSystemUID string,
 	syncerMetrics *metricscollector.SyncerMetrics,
 	customName bool,
+	lifecycleManaged bool,
 	log klog.Logger,
 	lpConfig labels.PodLabelPropagationConfig,
 	enableDualStackNEG bool,
@@ -178,6 +182,7 @@ func NewTransactionSyncer(
 		statusReporter:            statusReporter,
 		syncMetricsCollector:      syncerMetrics,
 		customName:                customName,
+		lifecycleManaged:          lifecycleManaged,
 		errorState:                false,
 		logger:                    logger,
 		enableDegradedMode:        flags.F.EnableDegradedMode,
@@ -566,24 +571,46 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 
 		for _, zone := range zones {
 			var negObj *composite.NetworkEndpointGroup
-			negObj, err = ensureNetworkEndpointGroup(
-				s.Namespace,
-				s.Name,
-				negName,
-				zone,
-				s.NegSyncerKey.String(),
-				s.kubeSystemUID,
-				fmt.Sprint(s.NegSyncerKey.PortTuple.Port),
-				s.NegSyncerKey.NegType,
-				s.cloud,
-				s.serviceLister,
-				s.recorder,
-				s.NegSyncerKey.GetAPIVersion(),
-				s.customName,
-				networkInfo,
-				s.logger,
-				s.negMetrics,
-			)
+			if s.lifecycleManaged {
+				negObj, err = ensureNetworkEndpointGroup(
+					s.Namespace,
+					s.Name,
+					negName,
+					zone,
+					s.NegSyncerKey.String(),
+					s.kubeSystemUID,
+					fmt.Sprint(s.NegSyncerKey.PortTuple.Port),
+					s.NegSyncerKey.NegType,
+					s.cloud,
+					s.serviceLister,
+					s.recorder,
+					s.NegSyncerKey.GetAPIVersion(),
+					s.customName,
+					networkInfo,
+					s.logger,
+					s.negMetrics,
+				)
+			} else {
+				var exists bool
+				negObj, exists, err = verifyNetworkEndpointGroup(
+					s.Namespace,
+					s.Name,
+					negName,
+					zone,
+					s.kubeSystemUID,
+					fmt.Sprint(s.NegSyncerKey.PortTuple.Port),
+					s.NegSyncerKey.NegType,
+					s.cloud,
+					s.NegSyncerKey.GetAPIVersion(),
+					s.customName,
+					networkInfo,
+					s.logger,
+					s.negMetrics,
+				)
+				if err == nil && !exists {
+					err = fmt.Errorf("NEG %s not found in zone %s", negName, zone)
+				}
+			}
 			if err != nil {
 				errList = append(errList, err)
 				// Do not modify NEG Status if there is conflict within the same cluster

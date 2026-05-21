@@ -123,46 +123,111 @@ func getService(serviceLister cache.Indexer, namespace, name string, logger klog
 	return nil
 }
 
-// ensureNetworkEndpointGroup ensures corresponding NEG is configured correctly in the specified zone.
-func ensureNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negServicePortName, kubeSystemUID, port string, networkEndpointType negtypes.NetworkEndpointType, cloud negtypes.NetworkEndpointGroupCloud, serviceLister cache.Indexer, recorder record.EventRecorder, version meta.Version, customName bool, networkInfo network.NetworkInfo, logger klog.Logger, negMetrics *metrics.NegMetrics) (*composite.NetworkEndpointGroup, error) {
+var errMismatchedNetwork = errors.New("NEG has mismatched network or subnetwork")
+
+// verifyNetworkEndpointGroup retrieves the NEG and verifies its description and network/subnetwork.
+// It returns:
+// - neg: the retrieved NEG (can be nil if not found)
+// - exists: true if NEG exists, false otherwise (404)
+// - err: error if verification fails (mismatched, or description mismatch, or GCE API errors other than 404)
+func verifyNetworkEndpointGroup(svcNamespace, svcName, negName, zone, kubeSystemUID, port string, networkEndpointType negtypes.NetworkEndpointType, cloud negtypes.NetworkEndpointGroupCloud, version meta.Version, customName bool, networkInfo network.NetworkInfo, logger klog.Logger, negMetrics *metrics.NegMetrics) (*composite.NetworkEndpointGroup, bool, error) {
 	negLogger := logger.WithValues("negName", negName, "zone", zone)
 	neg, err := cloud.GetNetworkEndpointGroup(negName, zone, version, logger)
 	if err != nil {
 		if !utils.IsNotFoundError(err) {
 			negLogger.Error(err, "Failed to get Neg")
-			return nil, err
+			return nil, false, err
 		}
 		negLogger.Info("Neg was not found", "err", err)
 		negMetrics.PublishNegControllerErrorCountMetrics(err, true)
+		return nil, false, nil // Return nil, false, nil on 404 (no error)
+	}
+	if neg == nil {
+		return nil, false, nil
 	}
 
-	needToCreate := false
+	expectedDesc := utils.NegDescription{
+		ClusterUID:  kubeSystemUID,
+		Namespace:   svcNamespace,
+		ServiceName: svcName,
+		Port:        port,
+	}
+	if customName && neg.Description == "" {
+		negLogger.Error(nil, "Found Neg with custom name but empty description")
+		return nil, true, fmt.Errorf("found a custom named neg %s with an empty description", negName)
+	}
+	if matches, err := utils.VerifyDescription(expectedDesc, neg.Description, negName, zone); !matches {
+		negLogger.Error(err, "Neg Name is already in use")
+		return nil, true, fmt.Errorf("found conflicting description in neg %s: %w", negName, err)
+	}
+
+	if networkEndpointType != negtypes.NonGCPPrivateEndpointType &&
+		(!utils.EqualResourceIDs(neg.Network, networkInfo.NetworkURL) ||
+			!utils.EqualResourceIDs(neg.Subnetwork, networkInfo.SubnetworkURL)) {
+		negLogger.Info("NEG does not match network and subnetwork of the cluster. NEG needs to be recreated", "negNetwork", neg.Network, "clusterNetwork", networkInfo.NetworkURL, "negSubnetwork", neg.Subnetwork, "clusterSubnetwork", networkInfo.SubnetworkURL)
+		return neg, true, errMismatchedNetwork // Return NEG, true, and custom error to signal recreation is needed
+	}
+
+	return neg, true, nil
+}
+
+// createNetworkEndpointGroup creates the NEG in GCE and verifies that it was successfully created.
+func createNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negServicePortName, kubeSystemUID, port string, networkEndpointType negtypes.NetworkEndpointType, cloud negtypes.NetworkEndpointGroupCloud, serviceLister cache.Indexer, recorder record.EventRecorder, version meta.Version, networkInfo network.NetworkInfo, logger klog.Logger, negMetrics *metrics.NegMetrics) (*composite.NetworkEndpointGroup, error) {
+	negLogger := logger.WithValues("negName", negName, "zone", zone)
+	var subnetwork string
+	switch networkEndpointType {
+	case negtypes.NonGCPPrivateEndpointType:
+		subnetwork = ""
+	default:
+		subnetwork = networkInfo.SubnetworkURL
+	}
+	negLogger.Info("Creating NEG", "negServicePortName", negServicePortName, "network", networkInfo.NetworkURL, "subnetwork", subnetwork)
+	desc := ""
+	negDesc := utils.NegDescription{
+		ClusterUID:  kubeSystemUID,
+		Namespace:   svcNamespace,
+		ServiceName: svcName,
+		Port:        port,
+	}
+	desc = negDesc.String()
+
+	err := cloud.CreateNetworkEndpointGroup(&composite.NetworkEndpointGroup{
+		Version:             version,
+		Name:                negName,
+		NetworkEndpointType: string(networkEndpointType),
+		Network:             networkInfo.NetworkURL,
+		Subnetwork:          subnetwork,
+		Description:         desc,
+	}, zone, logger)
+	if err != nil {
+		return nil, err
+	}
+	if recorder != nil && serviceLister != nil {
+		if svc := getService(serviceLister, svcNamespace, svcName, logger, negMetrics); svc != nil {
+			recorder.Eventf(svc, apiv1.EventTypeNormal, "Create", "Created NEG %q for %s in %q.", negName, negServicePortName, zone)
+		}
+	}
+
+	// Verify that it was successfully created (by retrieving it again)
+	neg, err := cloud.GetNetworkEndpointGroup(negName, zone, version, logger)
+	if err != nil {
+		negLogger.Error(err, "Error while retrieving NEG after initialization")
+		return nil, err
+	}
 	if neg == nil {
-		needToCreate = true
-	} else {
-		expectedDesc := utils.NegDescription{
-			ClusterUID:  kubeSystemUID,
-			Namespace:   svcNamespace,
-			ServiceName: svcName,
-			Port:        port,
-		}
-		if customName && neg.Description == "" {
-			negLogger.Error(nil, "Found Neg with custom name but empty description")
-			return nil, fmt.Errorf("found a custom named neg %s with an empty description", negName)
-		}
-		if matches, err := utils.VerifyDescription(expectedDesc, neg.Description, negName, zone); !matches {
-			negLogger.Error(err, "Neg Name is already in use")
-			// Wrap returned error from VerifyDescription() since we need to check if error is ErrNEGUsedByAnotherSyncer.
-			return nil, fmt.Errorf("found conflicting description in neg %s: %w", negName, err)
-		}
+		return nil, fmt.Errorf("NEG %s was successfully created but not found when retrieving", negName)
+	}
+	return neg, nil
+}
 
-		if networkEndpointType != negtypes.NonGCPPrivateEndpointType &&
-			// Only perform the following checks when the NEGs are not Non-GCP NEGs.
-			// Non-GCP NEGs do not have associated network and subnetwork.
-			(!utils.EqualResourceIDs(neg.Network, networkInfo.NetworkURL) ||
-				!utils.EqualResourceIDs(neg.Subnetwork, networkInfo.SubnetworkURL)) {
+// ensureNetworkEndpointGroup ensures corresponding NEG is configured correctly in the specified zone.
+func ensureNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negServicePortName, kubeSystemUID, port string, networkEndpointType negtypes.NetworkEndpointType, cloud negtypes.NetworkEndpointGroupCloud, serviceLister cache.Indexer, recorder record.EventRecorder, version meta.Version, customName bool, networkInfo network.NetworkInfo, logger klog.Logger, negMetrics *metrics.NegMetrics) (*composite.NetworkEndpointGroup, error) {
+	negLogger := logger.WithValues("negName", negName, "zone", zone)
+	neg, exists, err := verifyNetworkEndpointGroup(svcNamespace, svcName, negName, zone, kubeSystemUID, port, networkEndpointType, cloud, version, customName, networkInfo, logger, negMetrics)
 
-			needToCreate = true
+	needToCreate := false
+	if err != nil {
+		if errors.Is(err, errMismatchedNetwork) {
 			negLogger.Info("NEG does not match network and subnetwork of the cluster. Deleting NEG")
 			err = cloud.DeleteNetworkEndpointGroup(negName, zone, version, logger)
 			if err != nil {
@@ -173,50 +238,19 @@ func ensureNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negService
 					recorder.Eventf(svc, apiv1.EventTypeNormal, "Delete", "Deleted NEG %q for %s in %q.", negName, negServicePortName, zone)
 				}
 			}
+			needToCreate = true
+		} else {
+			return nil, err
 		}
+	}
+
+	if !exists {
+		needToCreate = true
 	}
 
 	if needToCreate {
-		var subnetwork string
-		switch networkEndpointType {
-		case negtypes.NonGCPPrivateEndpointType:
-			subnetwork = ""
-		default:
-			subnetwork = networkInfo.SubnetworkURL
-		}
-		negLogger.Info("Creating NEG", "negServicePortName", negServicePortName, "network", networkInfo.NetworkURL, "subnetwork", subnetwork)
-		desc := ""
-		negDesc := utils.NegDescription{
-			ClusterUID:  kubeSystemUID,
-			Namespace:   svcNamespace,
-			ServiceName: svcName,
-			Port:        port,
-		}
-		desc = negDesc.String()
-
-		err = cloud.CreateNetworkEndpointGroup(&composite.NetworkEndpointGroup{
-			Version:             version,
-			Name:                negName,
-			NetworkEndpointType: string(networkEndpointType),
-			Network:             networkInfo.NetworkURL,
-			Subnetwork:          subnetwork,
-			Description:         desc,
-		}, zone, logger)
+		neg, err = createNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negServicePortName, kubeSystemUID, port, networkEndpointType, cloud, serviceLister, recorder, version, networkInfo, logger, negMetrics)
 		if err != nil {
-			return nil, err
-		}
-		if recorder != nil && serviceLister != nil {
-			if svc := getService(serviceLister, svcNamespace, svcName, logger, negMetrics); svc != nil {
-				recorder.Eventf(svc, apiv1.EventTypeNormal, "Create", "Created NEG %q for %s in %q.", negName, negServicePortName, zone)
-			}
-		}
-	}
-
-	if neg == nil {
-		var err error
-		neg, err = cloud.GetNetworkEndpointGroup(negName, zone, version, logger)
-		if err != nil {
-			negLogger.Error(err, "Error while retrieving NEG after initialization")
 			return nil, err
 		}
 	}

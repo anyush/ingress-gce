@@ -1724,7 +1724,8 @@ func TestNameUniqueness(t *testing.T) {
 		false,
 		networkInfo,
 		klog.TODO(),
-		metrics.NewNegMetrics())
+		metrics.NewNegMetrics(),
+	)
 
 	if err == nil {
 		t.Errorf("Expected error when called with duplicate NEG name")
@@ -1772,7 +1773,8 @@ func TestNegObjectCrd(t *testing.T) {
 			false,
 			networkInfo,
 			klog.TODO(),
-			metrics.NewNegMetrics())
+			metrics.NewNegMetrics(),
+		)
 		if err != nil {
 			t.Errorf("Errored while ensuring network endpoint groups: %s", err)
 		}
