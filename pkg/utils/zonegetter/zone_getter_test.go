@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -724,13 +725,33 @@ func TestNonGCPZoneGetter(t *testing.T) {
 	zone := "foo"
 	subnet := ""
 	zoneGetter := NewNonGCPZoneGetter(zone)
+	expectZones := []string{zone}
+
+	// ListZones
 	ret, err := zoneGetter.ListZones(AllNodesFilter, klog.TODO())
 	if err != nil {
-		t.Errorf("expect err = nil, but got %v", err)
+		t.Errorf("expect err = nil for ListZones, but got %v", err)
 	}
-	expectZones := []string{zone}
 	if !reflect.DeepEqual(expectZones, ret) {
-		t.Errorf("expect list zones = %v, but got %v", expectZones, ret)
+		t.Errorf("expect ListZones = %v, but got %v", expectZones, ret)
+	}
+
+	// ListZonesInDefaultSubnet
+	retInDefault, err := zoneGetter.ListZonesInDefaultSubnet(AllNodesFilter, klog.TODO())
+	if err != nil {
+		t.Errorf("expect err = nil for ListZonesInDefaultSubnet, but got %v", err)
+	}
+	if !reflect.DeepEqual(expectZones, retInDefault) {
+		t.Errorf("expect ListZonesInDefaultSubnet = %v, but got %v", expectZones, retInDefault)
+	}
+
+	// ListZonesForSubnet
+	retForSubnet, err := zoneGetter.ListZonesForSubnet(AllNodesFilter, "some-subnet", klog.TODO())
+	if err != nil {
+		t.Errorf("expect err = nil for ListZonesForSubnet, but got %v", err)
+	}
+	if !reflect.DeepEqual(expectZones, retForSubnet) {
+		t.Errorf("expect ListZonesForSubnet = %v, but got %v", expectZones, retForSubnet)
 	}
 
 	validateGetZoneForNode := func(node string) {
@@ -1610,7 +1631,7 @@ func TestListSubnets(t *testing.T) {
 			fakeTopologyInformer := FakeNodeTopologyInformer()
 			zoneGetter, err := NewFakeZoneGetter(FakeNodeInformer(), fakeTopologyInformer, defaultTestSubnetURL, !tc.enableMSC)
 			if err != nil {
-				t.Fatalf("failed to initialize zone getter")
+				t.Fatalf("failed to initialize zone getter: %v", err)
 			}
 
 			zoneGetter.nodeTopologyHasSynced = func() bool { return tc.nodeTopologySynced }
@@ -1637,5 +1658,65 @@ func TestLegacyListSubnets(t *testing.T) {
 	subnets := zoneGetter.ListSubnets(klog.TODO())
 	if len(subnets) != 0 {
 		t.Errorf("In legacy mode, ListSubnets() returned %d, expected 0 subnets", len(subnets))
+	}
+}
+
+func TestListZonesForSubnet(t *testing.T) {
+	t.Parallel()
+
+	nodeInformer := FakeNodeInformer()
+	PopulateFakeNodeInformer(nodeInformer, false)
+	zoneGetter, err := NewFakeZoneGetter(nodeInformer, FakeNodeTopologyInformer(), defaultTestSubnetURL, false)
+	if err != nil {
+		t.Fatalf("failed to initialize zone getter")
+	}
+	testCases := []struct {
+		desc        string
+		filter      Filter
+		subnet      string
+		expectZones []string
+	}{
+		{
+			desc:        "List with AllNodesFilter, default subnet",
+			filter:      AllNodesFilter,
+			subnet:      "default",
+			expectZones: []string{"zone1", "zone2", "zone3", "zone4"},
+		},
+		{
+			desc:        "List with AllNodesFilter, non-default subnet",
+			filter:      AllNodesFilter,
+			subnet:      "non-default",
+			expectZones: []string{},
+		},
+		{
+			desc:        "List with CandidateNodesFilter, default subnet",
+			filter:      CandidateNodesFilter,
+			subnet:      "default",
+			expectZones: []string{"zone1", "zone2", "zone4"},
+		},
+		{
+			desc:        "List with CandidateAndUnreadyNodesFilter, default subnet",
+			filter:      CandidateAndUnreadyNodesFilter,
+			subnet:      "default",
+			expectZones: []string{"zone1", "zone2", "zone3"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			for _, enableMultiSubnetCluster := range []bool{true, false} {
+				zoneGetter.onlyIncludeDefaultSubnetNodes = enableMultiSubnetCluster
+				zones, _ := zoneGetter.ListZonesForSubnet(tc.filter, tc.subnet, klog.TODO())
+				sort.Strings(zones)
+				if !reflect.DeepEqual(zones, tc.expectZones) {
+					t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, got zones %v, want %v", tc.desc, enableMultiSubnetCluster, zones, tc.expectZones)
+				}
+				for _, zone := range zones {
+					if zone == EmptyZone {
+						t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, got an empty zone,", tc.desc, enableMultiSubnetCluster)
+					}
+				}
+			}
+		})
 	}
 }

@@ -775,10 +775,39 @@ func TestIpsForPod(t *testing.T) {
 func TestRetrieveExistingZoneNetworkEndpointMap(t *testing.T) {
 	nodeInformer := zonegetter.FakeNodeInformer()
 	zonegetter.PopulateFakeNodeInformer(nodeInformer, false)
+
+	for _, zone := range []string{negtypes.TestZone1, negtypes.TestZone2, negtypes.TestZone4} {
+		nodeName := fmt.Sprintf("additional-node-%s-%s", zone, additionalTestSubnet)
+		node := &v1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: nodeName,
+				Labels: map[string]string{
+					utils.LabelNodeSubnet: additionalTestSubnet,
+				},
+			},
+			Spec: v1.NodeSpec{
+				ProviderID: fmt.Sprintf("gce://foo-project/%s/%s", zone, nodeName),
+				PodCIDR:    "10.100.99.0/24",
+			},
+			Status: v1.NodeStatus{
+				Conditions: []v1.NodeCondition{
+					{
+						Type:   v1.NodeReady,
+						Status: v1.ConditionTrue,
+					},
+				},
+			},
+		}
+		if err := nodeInformer.GetIndexer().Add(node); err != nil {
+			t.Fatalf("Failed to add fake node: %v", err)
+		}
+	}
+
 	zoneGetter, err := zonegetter.NewFakeZoneGetter(nodeInformer, zonegetter.FakeNodeTopologyInformer(), defaultTestSubnetURL, false)
 	if err != nil {
 		t.Fatalf("failed to initialize zone getter: %v", err)
 	}
+	zonegetter.SetNodeTopologyHasSynced(zoneGetter, func() bool { return true })
 	negCloud := negtypes.NewFakeNetworkEndpointGroupCloud("test-subnetwork", "test-network")
 	defaultSubnetNegName := "test-neg-name"
 	nonDefaultSubnetNegName := "non-default-neg-name"

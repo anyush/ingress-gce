@@ -229,19 +229,60 @@ func (z *ZoneGetter) ListNodesInDefaultSubnet(filter Filter, logger klog.Logger)
 // ListZones returns a list of zones containing nodes that satisfy the given
 // node filtering mode.
 func (z *ZoneGetter) ListZones(filter Filter, logger klog.Logger) ([]string, error) {
-	return z.listZones(filter, false, logger)
+	subnetToZones, err := z.listZones(filter, false, logger)
+	if err != nil {
+		return nil, err
+	}
+	allZones := sets.New[string]()
+	for _, zones := range subnetToZones {
+		allZones = allZones.Union(zones)
+	}
+	return allZones.UnsortedList(), nil
 }
 
 // ListZonesInDefaultSubnet returns a list of zones containing nodes in the default subnet that satisfy the given
 // node filtering mode.
 func (z *ZoneGetter) ListZonesInDefaultSubnet(filter Filter, logger klog.Logger) ([]string, error) {
-	return z.listZones(filter, true, logger)
+	if z.mode == NonGCP {
+		return z.ListZones(filter, logger)
+	}
+
+	defaultSubnet, err := utils.KeyName(z.defaultSubnetURL)
+	if err != nil {
+		return nil, err
+	}
+
+	subnetToZones, err := z.listZones(filter, true, logger)
+	if err != nil {
+		return nil, err
+	}
+	if zones, ok := subnetToZones[defaultSubnet]; ok {
+		return zones.UnsortedList(), nil
+	}
+	return []string{}, nil
 }
 
-func (z *ZoneGetter) listZones(filter Filter, defaultSubnetOnly bool, logger klog.Logger) ([]string, error) {
+// ListZonesForSubnet returns a list of zones containing nodes in the given subnet that satisfy the given node filtering mode.
+func (z *ZoneGetter) ListZonesForSubnet(filter Filter, subnet string, logger klog.Logger) ([]string, error) {
+	if z.mode == Legacy || z.mode == NonGCP {
+		return z.ListZones(filter, logger)
+	}
+
+	subnetToZones, err := z.listZones(filter, false, logger)
+	if err != nil {
+		return nil, err
+	}
+	if zones, ok := subnetToZones[subnet]; ok {
+		return zones.UnsortedList(), nil
+	}
+	return []string{}, nil
+}
+
+// list zones returns zones where filtered nodes are found by subnet (map[subnetName]sets.Set[zoneName])
+func (z *ZoneGetter) listZones(filter Filter, defaultSubnetOnly bool, logger klog.Logger) (map[string]sets.Set[string], error) {
 	if z.mode == NonGCP {
 		logger.V(4).Info("ZoneGetter in non-gcp mode, return the single stored zone", "zone", z.singleStoredZone)
-		return []string{z.singleStoredZone}, nil
+		return map[string]sets.Set[string]{"": sets.New[string](z.singleStoredZone)}, nil
 	}
 	filterLogger := logger.WithValues("filter", filter)
 	filterLogger.V(2).Info("Listing zones")
@@ -254,18 +295,31 @@ func (z *ZoneGetter) listZones(filter Filter, defaultSubnetOnly bool, logger klo
 	}
 	if err != nil {
 		filterLogger.Error(err, "Failed to list nodes")
-		return []string{}, err
+		return nil, err
 	}
-	zones := sets.String{}
+	subnetToZones := make(map[string]sets.Set[string])
 	for _, n := range nodes {
 		zone, err := getZone(n)
 		if err != nil || zone == EmptyZone {
 			filterLogger.Error(err, "Failed to get zone from providerID", "nodeName", n.Name)
 			continue
 		}
-		zones.Insert(zone)
+
+		subnet := ""
+		if z.mode != Legacy {
+			subnet, err = getSubnet(n, z.defaultSubnetURL)
+			if err != nil {
+				filterLogger.Error(err, "Failed to get subnet for node, skipping", "nodeName", n.Name)
+				continue
+			}
+		}
+
+		if _, ok := subnetToZones[subnet]; !ok {
+			subnetToZones[subnet] = sets.New[string]()
+		}
+		subnetToZones[subnet].Insert(zone)
 	}
-	return zones.List(), nil
+	return subnetToZones, nil
 }
 
 // ListSubnets returns the lists of subnets in the cluster based on the
