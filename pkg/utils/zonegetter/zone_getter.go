@@ -265,13 +265,14 @@ func (z *ZoneGetter) ListZonesInDefaultSubnet(filter Filter, logger klog.Logger)
 // ListZonesPerSubnet returns a list of zones containing nodes that satisfy the given node filtering mode per subnet.
 func (z *ZoneGetter) ListZonesPerSubnet(filter Filter, logger klog.Logger) (map[string][]string, error) {
 	if z.mode == Legacy || z.mode == NonGCP {
+		// return all zones per every subnet (default subnet only for Legacy)
 		zones, err := z.ListZones(filter, logger)
 		if err != nil {
 			return nil, err
 		}
 		subnetConfigs := z.ListSubnets(logger)
 		if subnetConfigs == nil {
-			subnetConfigs = []nodetopologyv1.SubnetConfig{nodetopologyv1.SubnetConfig{Name: ""}}
+			subnetConfigs = []nodetopologyv1.SubnetConfig{z.defaultSubnetConfig}
 		}
 		zonesPerSubnet := make(map[string][]string, len(subnetConfigs))
 		for _, subnetConfig := range subnetConfigs {
