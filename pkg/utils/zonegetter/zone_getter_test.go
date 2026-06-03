@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -725,6 +726,7 @@ func TestNonGCPZoneGetter(t *testing.T) {
 	zone := "foo"
 	subnet := ""
 	zoneGetter := NewNonGCPZoneGetter(zone)
+	SetNodeTopologyHasSynced(zoneGetter, func() bool { return false })
 	expectZones := []string{zone}
 
 	// ListZones
@@ -745,13 +747,14 @@ func TestNonGCPZoneGetter(t *testing.T) {
 		t.Errorf("expect ListZonesInDefaultSubnet = %v, but got %v", expectZones, retInDefault)
 	}
 
-	// ListZonesForSubnet
-	retForSubnet, err := zoneGetter.ListZonesForSubnet(AllNodesFilter, "some-subnet", klog.TODO())
+	// ListZonesPerSubnet
+	retPerSubnet, err := zoneGetter.ListZonesPerSubnet(AllNodesFilter, klog.TODO())
 	if err != nil {
-		t.Errorf("expect err = nil for ListZonesForSubnet, but got %v", err)
+		t.Errorf("expect err = nil for ListZonesPerSubnet, but got %v", err)
 	}
-	if !reflect.DeepEqual(expectZones, retForSubnet) {
-		t.Errorf("expect ListZonesForSubnet = %v, but got %v", expectZones, retForSubnet)
+	expectZonesPerSubnet := map[string][]string{"": expectZones}
+	if !reflect.DeepEqual(expectZonesPerSubnet, retPerSubnet) {
+		t.Errorf("expect ListZonesPerSubnet = %v, but got %v", expectZonesPerSubnet, retPerSubnet)
 	}
 
 	validateGetZoneForNode := func(node string) {
@@ -1661,59 +1664,114 @@ func TestLegacyListSubnets(t *testing.T) {
 	}
 }
 
-func TestListZonesForSubnet(t *testing.T) {
+func TestLegacyListZonesPerSubnet(t *testing.T) {
 	t.Parallel()
 
 	nodeInformer := FakeNodeInformer()
-	PopulateFakeNodeInformer(nodeInformer, false)
+	PopulateFakeNodeInformer(nodeInformer, true)
+	zoneGetter := NewLegacyZoneGetter(nodeInformer, FakeNodeTopologyInformer())
+
+	expectZones := []string{"zone1", "zone2", "zone3", "zone4", "zone5", "zone6", "zone7", "zone8"}
+
+	zonesPerSubnet, err := zoneGetter.ListZonesPerSubnet(AllNodesFilter, klog.TODO())
+	if err != nil {
+		t.Errorf("expect err = nil for ListZonesPerSubnet, but got %v", err)
+	}
+
+	sort.Strings(expectZones)
+	for _, zones := range zonesPerSubnet {
+		sort.Strings(zones)
+	}
+
+	expectZonesPerSubnet := map[string][]string{"": expectZones}
+	if !reflect.DeepEqual(expectZonesPerSubnet, zonesPerSubnet) {
+		t.Errorf("expect ListZonesPerSubnet = %v, but got %v", expectZonesPerSubnet, zonesPerSubnet)
+	}
+}
+
+func TestListZonesPerSubnet(t *testing.T) {
+	t.Parallel()
+
+	nodeInformer := FakeNodeInformer()
+	PopulateFakeNodeInformer(nodeInformer, true)
 	zoneGetter, err := NewFakeZoneGetter(nodeInformer, FakeNodeTopologyInformer(), defaultTestSubnetURL, false)
 	if err != nil {
 		t.Fatalf("failed to initialize zone getter")
 	}
+	nodeTopologyCR := &nodetopologyv1.NodeTopology{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: flags.F.NodeTopologyCRName,
+		},
+		Status: nodetopologyv1.NodeTopologyStatus{
+			Subnets: []nodetopologyv1.SubnetConfig{
+				{Name: defaultTestSubnet, SubnetPath: defaultTestSubnetURL},
+				{Name: nonDefaultTestSubnet, SubnetPath: "https://www.googleapis.com/compute/v1/projects/proj/regions/us-central1/subnetworks/non-default"},
+			},
+		},
+	}
+	if err := AddNodeTopologyCR(zoneGetter, nodeTopologyCR); err != nil {
+		t.Fatalf("failed to add node topology CR: %v", err)
+	}
+	SetNodeTopologyHasSynced(zoneGetter, func() bool { return true })
+
 	testCases := []struct {
 		desc        string
 		filter      Filter
-		subnet      string
-		expectZones []string
+		expectZones map[string][]string
 	}{
 		{
-			desc:        "List with AllNodesFilter, default subnet",
-			filter:      AllNodesFilter,
-			subnet:      "default",
-			expectZones: []string{"zone1", "zone2", "zone3", "zone4"},
+			desc:   "List with AllNodesFilter",
+			filter: AllNodesFilter,
+			expectZones: map[string][]string{
+				"default":     {"zone1", "zone2", "zone3", "zone4", "zone5", "zone6"},
+				"non-default": {"zone8"},
+			},
 		},
 		{
-			desc:        "List with AllNodesFilter, non-default subnet",
-			filter:      AllNodesFilter,
-			subnet:      "non-default",
-			expectZones: []string{},
+			desc:   "List with CandidateNodesFilter",
+			filter: CandidateNodesFilter,
+			expectZones: map[string][]string{
+				"default":     {"zone1", "zone2", "zone4", "zone5", "zone6"},
+				"non-default": {"zone8"},
+			},
 		},
 		{
-			desc:        "List with CandidateNodesFilter, default subnet",
-			filter:      CandidateNodesFilter,
-			subnet:      "default",
-			expectZones: []string{"zone1", "zone2", "zone4"},
-		},
-		{
-			desc:        "List with CandidateAndUnreadyNodesFilter, default subnet",
-			filter:      CandidateAndUnreadyNodesFilter,
-			subnet:      "default",
-			expectZones: []string{"zone1", "zone2", "zone3"},
+			desc:   "List with CandidateAndUnreadyNodesFilter",
+			filter: CandidateAndUnreadyNodesFilter,
+			expectZones: map[string][]string{
+				"default":     {"zone1", "zone2", "zone3", "zone5", "zone6"},
+				"non-default": {"zone8"},
+			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			for _, enableMultiSubnetCluster := range []bool{true, false} {
-				zoneGetter.onlyIncludeDefaultSubnetNodes = enableMultiSubnetCluster
-				zones, _ := zoneGetter.ListZonesForSubnet(tc.filter, tc.subnet, klog.TODO())
-				sort.Strings(zones)
-				if !reflect.DeepEqual(zones, tc.expectZones) {
-					t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, got zones %v, want %v", tc.desc, enableMultiSubnetCluster, zones, tc.expectZones)
+			for _, onlyIncludeDefaultSubnetNodes := range []bool{true, false} {
+				zoneGetter.onlyIncludeDefaultSubnetNodes = onlyIncludeDefaultSubnetNodes
+				zonesPerSubnet, err := zoneGetter.ListZonesPerSubnet(tc.filter, klog.TODO())
+				if err != nil {
+					t.Errorf("expect err = nil, but got %v", err)
 				}
-				for _, zone := range zones {
-					if zone == EmptyZone {
-						t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, got an empty zone,", tc.desc, enableMultiSubnetCluster)
+
+				expected := make(map[string][]string)
+				for subnet, zones := range tc.expectZones {
+					if onlyIncludeDefaultSubnetNodes && subnet != defaultTestSubnet {
+						continue
+					}
+					expected[subnet] = slices.Clone(zones)
+					sort.Strings(expected[subnet])
+				}
+
+				for subnet, zones := range zonesPerSubnet {
+					sort.Strings(zones)
+					if !reflect.DeepEqual(zones, expected[subnet]) {
+						t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, subnet %s, got zones %v, want %v", tc.desc, onlyIncludeDefaultSubnetNodes, subnet, zones, expected[subnet])
+					}
+				}
+				for subnet := range expected {
+					if _, ok := zonesPerSubnet[subnet]; !ok && len(expected[subnet]) > 0 {
+						t.Errorf("For test case %q with onlyIncludeDefaultSubnetNodes = %v, missing subnet %s in zonesPerSubnet", tc.desc, onlyIncludeDefaultSubnetNodes, subnet)
 					}
 				}
 			}

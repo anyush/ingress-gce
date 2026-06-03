@@ -100,6 +100,6 @@ type NetworkEndpointsCalculator interface {
 
 // TopologyProvider is an interface for looking up zone and subnet information for NEG syncer.
 type TopologyProvider interface {
-	ListZonesForSubnet(filter zonegetter.Filter, subnet string, logger klog.Logger) ([]string, error)
 	ListSubnets(logger klog.Logger) []nodetopologyv1.SubnetConfig
+	ListZonesPerSubnet(filter zonegetter.Filter, logger klog.Logger) (map[string][]string, error)
 }

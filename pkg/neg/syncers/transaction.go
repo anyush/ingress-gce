@@ -565,69 +565,73 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 		subnetConfigs = []nodetopologyv1.SubnetConfig{subnetConfig}
 	}
 
-	for _, subnetConfig := range subnetConfigs {
-		// NEGs should be created in zones with candidate nodes only.
-		zones, err := s.topologyProvider.ListZonesForSubnet(s.candidateNodeFilter(), subnetConfig.Name, s.logger)
-		if err != nil {
-			errList = append(errList, err)
-			continue
-		}
-		negName := s.NegSyncerKey.NegName
-		networkInfo := s.networkInfo
-
-		if subnetConfig.Name != defaultSubnet {
-			// Determine the NEG name for the non-default subnet NEGs.
-			negName, err = s.getNonDefaultSubnetNEGName(subnetConfig.Name)
-			if err != nil {
-				s.logger.Error(err, "Unable to get the name of the additional NEG based on the subnet name", "subnetName", subnetConfig.Name)
-				errList = append(errList, err)
+	// NEGs should be created in zones with candidate nodes only.
+	zonesPerSubnet, err := s.topologyProvider.ListZonesPerSubnet(s.candidateNodeFilter(), s.logger)
+	if err != nil {
+		errList = append(errList, err)
+	} else {
+		for _, subnetConfig := range subnetConfigs {
+			zones, ok := zonesPerSubnet[subnetConfig.Name]
+			if !ok {
 				continue
 			}
+			negName := s.NegSyncerKey.NegName
+			networkInfo := s.networkInfo
 
-			// Determine the networkInfo for the non-default subnet NEGs.
-			resourceID, err := cloud.ParseResourceURL(subnetConfig.SubnetPath)
-			if err != nil {
-				s.logger.Error(err, "Failed to parse subnet path", "subnetPath", subnetConfig.SubnetPath)
-				errList = append(errList, err)
-				continue
-			}
-			// Add compute and version GA prefix.
-			networkInfo.SubnetworkURL = cloud.SelfLink(meta.VersionGA, resourceID.ProjectID, resourceID.Resource, resourceID.Key)
-		}
-
-		for _, zone := range zones {
-			var negObj negv1beta1.NegObjectReference
-			negObj, err = ensureNetworkEndpointGroup(
-				s.Namespace,
-				s.Name,
-				negName,
-				zone,
-				s.NegSyncerKey.String(),
-				s.kubeSystemUID,
-				fmt.Sprint(s.NegSyncerKey.PortTuple.Port),
-				s.NegSyncerKey.NegType,
-				s.cloud,
-				s.serviceLister,
-				s.recorder,
-				s.NegSyncerKey.GetAPIVersion(),
-				s.customName,
-				networkInfo,
-				s.logger,
-				s.negMetrics,
-			)
-			if err != nil {
-				errList = append(errList, err)
-				// Do not modify NEG Status if there is conflict within the same cluster
-				// and namespace because the CR is owned by a different syncer.
-				if errors.Is(err, utils.ErrNEGUsedByAnotherSyncer) {
-					updateNEGStatus = false
-					break
+			if subnetConfig.Name != defaultSubnet {
+				// Determine the NEG name for the non-default subnet NEGs.
+				negName, err = s.getNonDefaultSubnetNEGName(subnetConfig.Name)
+				if err != nil {
+					s.logger.Error(err, "Unable to get the name of the additional NEG based on the subnet name", "subnetName", subnetConfig.Name)
+					errList = append(errList, err)
+					continue
 				}
+
+				// Determine the networkInfo for the non-default subnet NEGs.
+				resourceID, err := cloud.ParseResourceURL(subnetConfig.SubnetPath)
+				if err != nil {
+					s.logger.Error(err, "Failed to parse subnet path", "subnetPath", subnetConfig.SubnetPath)
+					errList = append(errList, err)
+					continue
+				}
+				// Add compute and version GA prefix.
+				networkInfo.SubnetworkURL = cloud.SelfLink(meta.VersionGA, resourceID.ProjectID, resourceID.Resource, resourceID.Key)
 			}
 
-			if s.svcNegClient != nil && err == nil {
-				negObjRefs = append(negObjRefs, negObj)
-				negsByLocation[zone]++
+			for _, zone := range zones {
+				var negObj negv1beta1.NegObjectReference
+				negObj, err = ensureNetworkEndpointGroup(
+					s.Namespace,
+					s.Name,
+					negName,
+					zone,
+					s.NegSyncerKey.String(),
+					s.kubeSystemUID,
+					fmt.Sprint(s.NegSyncerKey.PortTuple.Port),
+					s.NegSyncerKey.NegType,
+					s.cloud,
+					s.serviceLister,
+					s.recorder,
+					s.NegSyncerKey.GetAPIVersion(),
+					s.customName,
+					networkInfo,
+					s.logger,
+					s.negMetrics,
+				)
+				if err != nil {
+					errList = append(errList, err)
+					// Do not modify NEG Status if there is conflict within the same cluster
+					// and namespace because the CR is owned by a different syncer.
+					if errors.Is(err, utils.ErrNEGUsedByAnotherSyncer) {
+						updateNEGStatus = false
+						break
+					}
+				}
+
+				if s.svcNegClient != nil && err == nil {
+					negObjRefs = append(negObjRefs, negObj)
+					negsByLocation[zone]++
+				}
 			}
 		}
 	}
@@ -936,15 +940,14 @@ func (s *transactionSyncer) isZoneChange() bool {
 	}
 
 	expectedSubnetZones := make(map[string]sets.Set[string])
-	subnets := s.topologyProvider.ListSubnets(s.logger)
-	for _, subnet := range subnets {
-		zones, err := s.topologyProvider.ListZonesForSubnet(s.candidateNodeFilter(), subnet.Name, s.logger)
-		if err != nil {
-			s.logger.Error(err, "unable to list zones for subnet", "subnet", subnet.Name)
-			s.negMetrics.PublishNegControllerErrorCountMetrics(err, true)
-			return false
-		}
-		expectedSubnetZones[subnet.Name] = sets.New[string](zones...)
+	zonesPerSubnet, err := s.topologyProvider.ListZonesPerSubnet(s.candidateNodeFilter(), s.logger)
+	if err != nil {
+		s.logger.Error(err, "unable to list zones")
+		s.negMetrics.PublishNegControllerErrorCountMetrics(err, true)
+		return false
+	}
+	for subnet, zones := range zonesPerSubnet {
+		expectedSubnetZones[subnet] = sets.New(zones...)
 	}
 
 	return !reflect.DeepEqual(expectedSubnetZones, existingSubnetZones)

@@ -702,16 +702,17 @@ func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string
 	zoneNetworkEndpointMap := map[negtypes.NEGLocation]negtypes.NetworkEndpointSet{}
 	endpointPodLabelMap := labels.EndpointPodLabelMap{}
 	drainingEndpoints := make(map[negtypes.NetworkEndpoint]string)
+	allZonesPerSubnet, err := zoneGetter.ListZonesPerSubnet(zonegetter.AllNodesFilter, logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	candidateZonesPerSubnet, err := zoneGetter.ListZonesPerSubnet(negtypes.NodeFilterForEndpointCalculatorMode(mode, includeDrainNodesL4Local), logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	for subnet, negName := range subnetToNegMapping {
-		zones, err := zoneGetter.ListZonesForSubnet(zonegetter.AllNodesFilter, subnet, logger)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-
-		candidateNodeZones, err := zoneGetter.ListZonesForSubnet(negtypes.NodeFilterForEndpointCalculatorMode(mode, includeDrainNodesL4Local), subnet, logger)
-		if err != nil {
-			return nil, nil, nil, err
-		}
+		zones := allZonesPerSubnet[subnet]
+		candidateNodeZones := candidateZonesPerSubnet[subnet]
 		candidateZonesMap := sets.NewString(candidateNodeZones...)
 
 		for _, zone := range zones {

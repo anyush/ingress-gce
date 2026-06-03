@@ -2115,6 +2115,17 @@ func TestEnsureNetworkEndpointGroupsMSC(t *testing.T) {
 				if err := zonegetter.AddNodeTopologyCR(syncer.topologyProvider.(*zonegetter.ZoneGetter), tc.nodeTopologyCr); err != nil {
 					t.Fatalf("Failed to create Node Topology CR: %v", err)
 				}
+				zg := syncer.topologyProvider.(*zonegetter.ZoneGetter)
+				for _, subnetConfig := range tc.nodeTopologyCr.Status.Subnets {
+					if subnetConfig.Name != defaultTestSubnet {
+						for _, zone := range zones {
+							nodeName := fmt.Sprintf("node-%s-%s", zone, subnetConfig.Name)
+							if err := addFakeNodeWithSubnet(zg, syncer.nodeLister, nodeName, zone, subnetConfig.Name); err != nil {
+								t.Fatalf("Failed to add fake node for subnet %s: %v", subnetConfig.Name, err)
+							}
+						}
+					}
+				}
 			}
 
 			err = syncer.ensureNetworkEndpointGroups()
