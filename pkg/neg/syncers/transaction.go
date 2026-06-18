@@ -56,6 +56,10 @@ import (
 	"k8s.io/klog/v2"
 )
 
+var (
+	EnsuredNEGsReportingFailedError = errors.New("failed to report ensured NEGs")
+)
+
 type transactionSyncer struct {
 	// metadata
 	negtypes.NegSyncerKey
@@ -289,12 +293,21 @@ func (s *transactionSyncer) syncInternalImpl() error {
 	// Only matters for L4 Local mode.
 	needInitDrainStatus := s.needInit && s.enableL4NEGDetachCancel && s.endpointsCalculator.Mode() == negtypes.L4LocalMode
 
+	var ensureErr error
 	if s.needInit || topologyChange {
 		s.logger.Info("Need to ensure network endpoint groups", "needInit", s.needInit, "topologyChange", topologyChange)
-		if err := s.ensureNetworkEndpointGroups(); err != nil {
-			return fmt.Errorf("%w: %v", negtypes.ErrNegNotFound, err)
+		ensureErr = s.ensureNetworkEndpointGroups()
+		if ensureErr == nil {
+			s.needInit = false
+		} else if errors.Is(ensureErr, EnsuredNEGsReportingFailedError) {
+			// EnsuredNEGsReportingFailedError treated as fatal error as further in code
+			// current state will be read from statusHandler, so it should be up to date.
+			return ensureErr
+		} else {
+			// Other errors will trigger resync only after this iteration will complete
+			// syncing ensured NEGs.
+			ensureErr = fmt.Errorf("%w: %v", negtypes.ErrNegNotFound, ensureErr)
 		}
-		s.needInit = false
 	}
 	s.logger.V(2).Info("Sync NEG", "negSyncerKey", s.NegSyncerKey.String(), "endpointsCalculatorMode", s.endpointsCalculator.Mode())
 
@@ -305,7 +318,7 @@ func (s *transactionSyncer) syncInternalImpl() error {
 		return err
 	}
 
-	currentMap, currentPodLabelMap, drainingEndpoints, err := retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, s.topologyProvider, s.cloud, s.NegSyncerKey.GetAPIVersion(), s.endpointsCalculator.Mode(), s.enableDualStackNEG, s.logger, s.negMetrics, needInitDrainStatus, s.NegSyncerKey.IncludeDrainNodesL4Local)
+	currentMap, currentPodLabelMap, drainingEndpoints, err := retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, s.topologyProvider, s.statusHandler, s.cloud, s.NegSyncerKey.GetAPIVersion(), s.endpointsCalculator.Mode(), s.enableDualStackNEG, s.logger, s.negMetrics, needInitDrainStatus, s.NegSyncerKey.IncludeDrainNodesL4Local)
 	if err != nil {
 		return fmt.Errorf("%w: %w", negtypes.ErrCurrentNegEPNotFound, err)
 	}
@@ -367,6 +380,10 @@ func (s *transactionSyncer) syncInternalImpl() error {
 			s.logger.Info("Using normal mode endpoint calculation")
 		}
 	}
+
+	// Filter out locations where is no NEG
+	targetMap = s.dropLocationsWithoutNEGs(targetMap, currentMap)
+
 	// When the flags are not enabled, error state should be reset when no
 	// error occurs in the sync.
 	// notInDegraded and onlyInDegraded are not populated when the flags are
@@ -420,13 +437,16 @@ func (s *transactionSyncer) syncInternalImpl() error {
 	}
 
 	if len(addEndpoints) == 0 && len(removeEndpoints) == 0 {
-		s.logger.V(3).Info("No endpoint change. Skip syncing NEG. ", s.Namespace, s.Name)
-		return nil
+		s.logger.V(3).Info("No endpoint change. Skip syncing NEG.", s.Namespace, s.Name)
+		return ensureErr
 	}
+
 	s.logEndpoints(addEndpoints, "adding endpoint")
 	s.logEndpoints(removeEndpoints, "removing endpoint")
-
-	return s.syncNetworkEndpoints(addEndpoints, removeEndpoints, endpointPodLabelMap, migrationZone)
+	if syncErr := s.syncNetworkEndpoints(addEndpoints, removeEndpoints, endpointPodLabelMap, migrationZone); syncErr != nil {
+		return utilerrors.NewAggregate([]error{ensureErr, syncErr})
+	}
+	return ensureErr
 }
 
 // reAddDrainingEndpointsThatAreInTargetMap will make sure that endpoints that are draining
@@ -638,6 +658,7 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 	if updateNEGStatus {
 		if err := s.statusHandler.ReportStatus(negObjs, errList); err != nil {
 			s.logger.Error(err, "Failed to report ensured NEGs on Status reporter")
+			return EnsuredNEGsReportingFailedError
 		}
 	}
 
@@ -928,6 +949,19 @@ func (s *transactionSyncer) isTopologyChange() bool {
 	}
 
 	return !reflect.DeepEqual(expectedSubnetZones, existingSubnetZones)
+}
+
+// dropLocationsWithoutNEGs excludes locations from targetMap that do not exist in currentMap.
+func (s *transactionSyncer) dropLocationsWithoutNEGs(targetMap, currentMap map[negtypes.NEGLocation]negtypes.NetworkEndpointSet) map[negtypes.NEGLocation]negtypes.NetworkEndpointSet {
+	filteredMap := make(map[negtypes.NEGLocation]negtypes.NetworkEndpointSet)
+	for loc, endpoints := range targetMap {
+		if _, ok := currentMap[loc]; ok {
+			filteredMap[loc] = endpoints
+		} else {
+			s.logger.Info("Excluding target endpoints for location, where is no NEG", "location", loc)
+		}
+	}
+	return filteredMap
 }
 
 // filterEndpointByTransaction removes the all endpoints from endpoint map if they exists in the transaction table

@@ -96,6 +96,9 @@ func TestTransactionSyncNetworkEndpoints(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to initialize transaction syncer: %v", err)
 		}
+
+		createAndAddMockSvcNEG(t, transactionSyncer)
+
 		if err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
 			t.Errorf("Expect error == nil, but got %v", err)
 		}
@@ -302,6 +305,8 @@ func TestTransactionSyncNetworkEndpointsMSC(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to initialize transaction syncer: %v", err)
 		}
+		createAndAddMockSvcNEG(t, transactionSyncer)
+
 		if err := zonegetter.AddNodeTopologyCR(transactionSyncer.topologyProvider.(*zonegetter.ZoneGetter), &nodeTopologyCrWithAdditionalSubnets); err != nil {
 			t.Fatalf("Failed to add node topology CR: %v", err)
 		}
@@ -551,6 +556,8 @@ func TestNegNameMultiNetworking(t *testing.T) {
 		}
 	}
 
+	createAndAddMockSvcNEG(t, transactionSyncer)
+
 	// Start syncer without starting syncer goroutine
 	(transactionSyncer.syncer.(*syncer)).stopped = false
 	if err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
@@ -758,6 +765,9 @@ func TestSyncNetworkEndpointLabel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to initialize transaction syncer: %v", err)
 		}
+
+		createAndAddMockSvcNEG(t, transactionSyncer)
+
 		if err := transactionSyncer.ensureNetworkEndpointGroups(); err != nil {
 			t.Errorf("Expect error == nil, but got %v", err)
 		}
@@ -2928,7 +2938,7 @@ func TestUnknownNodes(t *testing.T) {
 	}
 
 	// Check that unknown zone did not cause endpoints to be removed
-	out, _, _, err := retrieveExistingZoneNetworkEndpointMap(map[string]string{defaultTestSubnet: testNegName}, zoneGetter, fakeCloud, meta.VersionGA, negtypes.L7Mode, false, klog.TODO(), s.negMetrics, false, false)
+	out, _, _, err := retrieveExistingZoneNetworkEndpointMap(map[string]string{defaultTestSubnet: testNegName}, zoneGetter, s.statusHandler, fakeCloud, meta.VersionGA, negtypes.L7Mode, false, klog.TODO(), s.negMetrics, false, false)
 	if err != nil {
 		t.Errorf("errored retrieving existing network endpoints")
 	}
@@ -3192,11 +3202,10 @@ func TestEnableDegradedMode(t *testing.T) {
 					NetworkEndpointGroups: objRefs,
 				},
 			}
-			_, s, err := newTestTransactionSyncer(fakeCloud, negtypes.VmIpPortEndpointType, "")
+			_, s, err := newTestTransactionSyncer(fakeCloud, negtypes.VmIpPortEndpointType, tc.negName)
 			if err != nil {
 				t.Fatalf("failed to initialize transaction syncer: %v", err)
 			}
-			s.NegSyncerKey.NegName = tc.negName
 			s.needInit = false
 			addPodsToLister(s.podLister, getDefaultEndpointSlices())
 			for i := 1; i <= 4; i++ {
@@ -3231,7 +3240,7 @@ func TestEnableDegradedMode(t *testing.T) {
 			tc.modify(s)
 
 			subnetToNegMapping := map[string]string{defaultTestSubnet: tc.negName}
-			out, _, _, err := retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, zoneGetter, fakeCloud, meta.VersionGA, negtypes.L7Mode, false, klog.TODO(), s.negMetrics, false, false)
+			out, _, _, err := retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, zoneGetter, s.statusHandler, fakeCloud, meta.VersionGA, negtypes.L7Mode, false, klog.TODO(), s.negMetrics, false, false)
 			if err != nil {
 				t.Errorf("errored retrieving existing network endpoints")
 			}
@@ -3244,7 +3253,7 @@ func TestEnableDegradedMode(t *testing.T) {
 				t.Errorf("syncInternal returned %v, expected %v", err, tc.expectErr)
 			}
 			err = wait.PollImmediate(time.Second, 3*time.Second, func() (bool, error) {
-				out, _, _, err = retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, zoneGetter, fakeCloud, meta.VersionGA, negtypes.L7Mode, false, klog.TODO(), s.negMetrics, false, false)
+				out, _, _, err = retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, zoneGetter, s.statusHandler, fakeCloud, meta.VersionGA, negtypes.L7Mode, false, klog.TODO(), s.negMetrics, false, false)
 				if err != nil {
 					return false, nil
 				}
@@ -3923,7 +3932,7 @@ func TestSyncL4NEGs(t *testing.T) {
 			}
 			neg := &negv1beta1.ServiceNetworkEndpointGroup{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      testNegName,
+					Name:      testL4NegName,
 					Namespace: testServiceNamespace,
 				},
 				Status: negv1beta1.ServiceNetworkEndpointGroupStatus{
@@ -3960,7 +3969,7 @@ func TestSyncL4NEGs(t *testing.T) {
 			// give a little time for the syncer attach/detach goroutines to finish
 			time.Sleep(50 * time.Millisecond)
 
-			out, _, _, err := retrieveExistingZoneNetworkEndpointMap(map[string]string{defaultTestSubnet: testL4NegName}, zoneGetter, fakeCloud, meta.VersionGA, negtypes.L4LocalMode, false, klog.TODO(), s.negMetrics, false, s.NegSyncerKey.IncludeDrainNodesL4Local)
+			out, _, _, err := retrieveExistingZoneNetworkEndpointMap(map[string]string{defaultTestSubnet: testL4NegName}, zoneGetter, s.statusHandler, fakeCloud, meta.VersionGA, negtypes.L4LocalMode, false, klog.TODO(), s.negMetrics, false, s.NegSyncerKey.IncludeDrainNodesL4Local)
 			if err != nil {
 				t.Errorf("errored retrieving existing network endpoints: %v", err)
 			}
@@ -4096,6 +4105,61 @@ func TestReAddDrainingEndpointsThatAreInTargetMap(t *testing.T) {
 		if !reflect.DeepEqual(tc.addEndpoints, tc.expectEndpoints) {
 			t.Errorf("For case %q, expect addEndpoints to be %+v, but got %+v", tc.desc, tc.expectEndpoints, tc.addEndpoints)
 		}
+	}
+}
+
+func TestEnsureNEGsReportingFailedError(t *testing.T) {
+	fakeGCE := gce.NewFakeGCECloud(test.DefaultTestClusterValues())
+	negtypes.MockNetworkEndpointAPIs(fakeGCE)
+	fakeCloud := negtypes.NewAdapter(fakeGCE, negtypes.NewTestContext().NegMetrics)
+
+	_, transactionSyncer, err := newTestTransactionSyncer(fakeCloud, negtypes.VmIpEndpointType, "")
+	if err != nil {
+		t.Fatalf("failed to initialize transaction syncer: %v", err)
+	}
+
+	// Do NOT call createAndAddMockSvcNEG, so SvcNEG is not in store.
+	// Running syncInternal should fail with EnsuredNEGsReportingFailedError.
+	(transactionSyncer.syncer.(*syncer)).stopped = false
+	err = transactionSyncer.syncInternal()
+	if !errors.Is(err, EnsuredNEGsReportingFailedError) {
+		t.Errorf("Expected error %v, got %v", EnsuredNEGsReportingFailedError, err)
+	}
+}
+
+func TestDropLocationsWithoutNEGs(t *testing.T) {
+	fakeGCE := gce.NewFakeGCECloud(test.DefaultTestClusterValues())
+	negtypes.MockNetworkEndpointAPIs(fakeGCE)
+	fakeCloud := negtypes.NewAdapter(fakeGCE, negtypes.NewTestContext().NegMetrics)
+
+	_, ts, err := newTestTransactionSyncer(fakeCloud, negtypes.VmIpPortEndpointType, "")
+	if err != nil {
+		t.Fatalf("failed to initialize transaction syncer: %v", err)
+	}
+
+	targetMap := map[negtypes.NEGLocation]negtypes.NetworkEndpointSet{
+		{Zone: negtypes.TestZone1, Subnet: defaultTestSubnet}: negtypes.NewNetworkEndpointSet(
+			negtypes.NetworkEndpoint{IP: "1.2.3.4", Node: negtypes.TestInstance1},
+		),
+		{Zone: negtypes.TestZone2, Subnet: defaultTestSubnet}: negtypes.NewNetworkEndpointSet(
+			negtypes.NetworkEndpoint{IP: "1.2.3.5", Node: negtypes.TestInstance2},
+		),
+	}
+
+	currentMap := map[negtypes.NEGLocation]negtypes.NetworkEndpointSet{
+		{Zone: negtypes.TestZone1, Subnet: defaultTestSubnet}: negtypes.NewNetworkEndpointSet(),
+	}
+
+	filteredMap := ts.dropLocationsWithoutNEGs(targetMap, currentMap)
+
+	expectedMap := map[negtypes.NEGLocation]negtypes.NetworkEndpointSet{
+		{Zone: negtypes.TestZone1, Subnet: defaultTestSubnet}: negtypes.NewNetworkEndpointSet(
+			negtypes.NetworkEndpoint{IP: "1.2.3.4", Node: negtypes.TestInstance1},
+		),
+	}
+
+	if !reflect.DeepEqual(filteredMap, expectedMap) {
+		t.Errorf("dropLocationsWithoutNEGs failed: got %+v, expected %+v", filteredMap, expectedMap)
 	}
 }
 
@@ -4640,4 +4704,23 @@ func generateExpectedNegObjReferences(t *testing.T, cloud negtypes.NetworkEndpoi
 	}
 
 	return expectedNegRefs
+}
+
+func createAndAddMockSvcNEG(t *testing.T, s *transactionSyncer) {
+	t.Helper()
+	neg := &negv1beta1.ServiceNetworkEndpointGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      s.NegName,
+			Namespace: testServiceNamespace,
+		},
+	}
+	testStatusHandler := s.statusHandler.(*negstatushandler.TestSvcNegStatusHandler)
+	_, err := testStatusHandler.SvcNEGClient().NetworkingV1beta1().ServiceNetworkEndpointGroups(testServiceNamespace).Create(context.Background(), neg, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create SvcCRD: %v", err)
+	}
+	err = testStatusHandler.SvcNEGLister().Add(neg)
+	if err != nil {
+		t.Fatalf("Failed to add SvcCRD to lister: %v", err)
+	}
 }
