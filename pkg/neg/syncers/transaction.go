@@ -56,10 +56,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-var (
-	EnsuredNEGsReportingFailedError = errors.New("failed to report ensured NEGs")
-)
-
 type transactionSyncer struct {
 	// metadata
 	negtypes.NegSyncerKey
@@ -300,13 +296,10 @@ func (s *transactionSyncer) syncInternalImpl() error {
 		ensuredSubnetZones, ensureErr = s.ensureNetworkEndpointGroups()
 		if ensureErr == nil {
 			s.needInit = false
-		} else if errors.Is(ensureErr, EnsuredNEGsReportingFailedError) {
-			// EnsuredNEGsReportingFailedError treated as fatal error as further in code
-			// current state will be read from statusHandler, so it should be up to date.
-			return ensureErr
 		} else {
 			// Resync will be triggered only after this iteration will complete syncing ensured NEGs.
 			ensureErr = fmt.Errorf("%w: %v", negtypes.ErrNegNotFound, ensureErr)
+			s.needInit = true
 		}
 	} else {
 		var err error
@@ -387,7 +380,7 @@ func (s *transactionSyncer) syncInternalImpl() error {
 		}
 	}
 
-	// Filter out locations where is no NEG
+	// Filter out locations without NEGs
 	targetMap = s.dropLocationsWithoutNEGs(targetMap, currentMap)
 
 	// When the flags are not enabled, error state should be reset when no
@@ -669,7 +662,6 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() (map[string]sets.Set[s
 	if updateNEGStatus {
 		if err := s.statusHandler.ReportStatus(negObjs, errList); err != nil {
 			s.logger.Error(err, "Failed to report ensured NEGs on Status reporter")
-			return nil, EnsuredNEGsReportingFailedError
 		}
 	}
 
@@ -969,7 +961,7 @@ func (s *transactionSyncer) dropLocationsWithoutNEGs(targetMap, currentMap map[n
 		if _, ok := currentMap[loc]; ok {
 			filteredMap[loc] = endpoints
 		} else {
-			s.logger.Info("Excluding target endpoints for location, where is no NEG", "location", loc)
+			s.logger.Info("Excluding target endpoints for location as there is no NEG", "location", loc)
 		}
 	}
 	return filteredMap

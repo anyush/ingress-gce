@@ -702,6 +702,7 @@ func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string
 		if !ok {
 			continue
 		}
+		candidateZonesMap := sets.New(candidateZonesPerSubnet[subnet]...)
 
 		for zone := range ensuredZones {
 			loc := negtypes.NEGLocation{Zone: zone, Subnet: subnet}
@@ -711,7 +712,6 @@ func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string
 				// It is possible for a NEG to be missing in a zone without candidate nodes. Log and ignore this error.
 				// NEG not found in a candidate zone is an error.
 				if utils.IsNotFoundError(err) {
-					candidateZonesMap := sets.New(candidateZonesPerSubnet[subnet]...)
 					if !candidateZonesMap.Has(zone) {
 						logger.Info("Ignoring NotFound error for NEG", "negName", negName, "zone", zone, "subnet", subnet)
 						negMetrics.PublishNegControllerErrorCountMetrics(err, true)

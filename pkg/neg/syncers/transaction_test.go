@@ -4133,25 +4133,6 @@ func TestReAddDrainingEndpointsThatAreInTargetMap(t *testing.T) {
 	}
 }
 
-func TestEnsureNEGsReportingFailedError(t *testing.T) {
-	fakeGCE := gce.NewFakeGCECloud(test.DefaultTestClusterValues())
-	negtypes.MockNetworkEndpointAPIs(fakeGCE)
-	fakeCloud := negtypes.NewAdapter(fakeGCE, negtypes.NewTestContext().NegMetrics)
-
-	_, transactionSyncer, err := newTestTransactionSyncer(fakeCloud, negtypes.VmIpEndpointType, "")
-	if err != nil {
-		t.Fatalf("failed to initialize transaction syncer: %v", err)
-	}
-
-	// Do NOT call createAndAddMockSvcNEG, so SvcNEG is not in store.
-	// Running syncInternal should fail with EnsuredNEGsReportingFailedError.
-	(transactionSyncer.syncer.(*syncer)).stopped = false
-	err = transactionSyncer.syncInternal()
-	if !errors.Is(err, EnsuredNEGsReportingFailedError) {
-		t.Errorf("Expected error %v, got %v", EnsuredNEGsReportingFailedError, err)
-	}
-}
-
 func TestDropLocationsWithoutNEGs(t *testing.T) {
 	fakeGCE := gce.NewFakeGCECloud(test.DefaultTestClusterValues())
 	negtypes.MockNetworkEndpointAPIs(fakeGCE)
