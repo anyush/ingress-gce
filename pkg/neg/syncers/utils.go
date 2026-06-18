@@ -688,15 +688,10 @@ func podBelongsToService(pod *apiv1.Pod, service *apiv1.Service) error {
 }
 
 // retrieveExistingZoneNetworkEndpointMap lists existing network endpoints in the neg and return the zone and endpoints map.
-func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string, topologyProvider negtypes.TopologyProvider, negStatusHandler negtypes.NegStatusHandler, cloud negtypes.NetworkEndpointGroupCloud, version meta.Version, mode negtypes.EndpointsCalculatorMode, enableDualStackNEG bool, logger klog.Logger, negMetrics *metrics.NegMetrics, retrieveDrainStatus bool, includeDrainNodesL4Local bool) (map[negtypes.NEGLocation]negtypes.NetworkEndpointSet, labels.EndpointPodLabelMap, map[negtypes.NetworkEndpoint]string, error) {
+func retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping map[string]string, topologyProvider negtypes.TopologyProvider, ensuredZonesPerSubnet map[string]sets.Set[string], cloud negtypes.NetworkEndpointGroupCloud, version meta.Version, mode negtypes.EndpointsCalculatorMode, enableDualStackNEG bool, logger klog.Logger, negMetrics *metrics.NegMetrics, retrieveDrainStatus bool, includeDrainNodesL4Local bool) (map[negtypes.NEGLocation]negtypes.NetworkEndpointSet, labels.EndpointPodLabelMap, map[negtypes.NetworkEndpoint]string, error) {
 	zoneNetworkEndpointMap := map[negtypes.NEGLocation]negtypes.NetworkEndpointSet{}
 	endpointPodLabelMap := labels.EndpointPodLabelMap{}
 	drainingEndpoints := make(map[negtypes.NetworkEndpoint]string)
-
-	ensuredZonesPerSubnet, err := negStatusHandler.SubnetToZonesMap()
-	if err != nil {
-		return nil, nil, nil, err
-	}
 	candidateZonesPerSubnet, err := topologyProvider.ListZonesPerSubnet(negtypes.NodeFilterForEndpointCalculatorMode(mode, includeDrainNodesL4Local), logger)
 	if err != nil {
 		return nil, nil, nil, err

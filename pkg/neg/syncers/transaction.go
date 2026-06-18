@@ -294,9 +294,10 @@ func (s *transactionSyncer) syncInternalImpl() error {
 	needInitDrainStatus := s.needInit && s.enableL4NEGDetachCancel && s.endpointsCalculator.Mode() == negtypes.L4LocalMode
 
 	var ensureErr error
+	var ensuredSubnetZones map[string]sets.Set[string]
 	if s.needInit || topologyChange {
 		s.logger.Info("Need to ensure network endpoint groups", "needInit", s.needInit, "topologyChange", topologyChange)
-		ensureErr = s.ensureNetworkEndpointGroups()
+		ensuredSubnetZones, ensureErr = s.ensureNetworkEndpointGroups()
 		if ensureErr == nil {
 			s.needInit = false
 		} else if errors.Is(ensureErr, EnsuredNEGsReportingFailedError) {
@@ -304,9 +305,14 @@ func (s *transactionSyncer) syncInternalImpl() error {
 			// current state will be read from statusHandler, so it should be up to date.
 			return ensureErr
 		} else {
-			// Other errors will trigger resync only after this iteration will complete
-			// syncing ensured NEGs.
+			// Resync will be triggered only after this iteration will complete syncing ensured NEGs.
 			ensureErr = fmt.Errorf("%w: %v", negtypes.ErrNegNotFound, ensureErr)
+		}
+	} else {
+		var err error
+		ensuredSubnetZones, err = s.statusHandler.SubnetToZonesMap()
+		if err != nil {
+			return fmt.Errorf("failed to get subnet to zones map from status handler: %w", err)
 		}
 	}
 	s.logger.V(2).Info("Sync NEG", "negSyncerKey", s.NegSyncerKey.String(), "endpointsCalculatorMode", s.endpointsCalculator.Mode())
@@ -318,7 +324,7 @@ func (s *transactionSyncer) syncInternalImpl() error {
 		return err
 	}
 
-	currentMap, currentPodLabelMap, drainingEndpoints, err := retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, s.topologyProvider, s.statusHandler, s.cloud, s.NegSyncerKey.GetAPIVersion(), s.endpointsCalculator.Mode(), s.enableDualStackNEG, s.logger, s.negMetrics, needInitDrainStatus, s.NegSyncerKey.IncludeDrainNodesL4Local)
+	currentMap, currentPodLabelMap, drainingEndpoints, err := retrieveExistingZoneNetworkEndpointMap(subnetToNegMapping, s.topologyProvider, ensuredSubnetZones, s.cloud, s.NegSyncerKey.GetAPIVersion(), s.endpointsCalculator.Mode(), s.enableDualStackNEG, s.logger, s.negMetrics, needInitDrainStatus, s.NegSyncerKey.IncludeDrainNodesL4Local)
 	if err != nil {
 		return fmt.Errorf("%w: %w", negtypes.ErrCurrentNegEPNotFound, err)
 	}
@@ -548,17 +554,18 @@ func (s *transactionSyncer) candidateNodeFilter() zonegetter.Filter {
 }
 
 // ensureNetworkEndpointGroups ensures NEGs are created and configured correctly in the corresponding zones.
-func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
+func (s *transactionSyncer) ensureNetworkEndpointGroups() (map[string]sets.Set[string], error) {
 	var errList []error
 	var negObjs []*composite.NetworkEndpointGroup
 	updateNEGStatus := true
 	negsByLocation := make(map[string]int)
+	ensuredSubnetZones := make(map[string]sets.Set[string])
 
 	// Get default subnet from syncer's networkInfo.
 	defaultSubnet, err := utils.KeyName(s.networkInfo.SubnetworkURL)
 	if err != nil {
 		s.logger.Error(err, "Errored getting default subnet from NetworkInfo when ensuring NEGs")
-		return err
+		return nil, err
 	}
 
 	var subnetConfigs []nodetopologyv1.SubnetConfig
@@ -577,7 +584,7 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 
 		subnetConfig, err := nodetopology.SubnetConfigFromSubnetURL(s.networkInfo.SubnetworkURL)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		subnetConfigs = []nodetopologyv1.SubnetConfig{subnetConfig}
 	}
@@ -650,6 +657,10 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 				if err == nil {
 					negObjs = append(negObjs, negObj)
 					negsByLocation[zone]++
+					if _, ok := ensuredSubnetZones[subnetConfig.Name]; !ok {
+						ensuredSubnetZones[subnetConfig.Name] = sets.New[string]()
+					}
+					ensuredSubnetZones[subnetConfig.Name].Insert(zone)
 				}
 			}
 		}
@@ -658,12 +669,12 @@ func (s *transactionSyncer) ensureNetworkEndpointGroups() error {
 	if updateNEGStatus {
 		if err := s.statusHandler.ReportStatus(negObjs, errList); err != nil {
 			s.logger.Error(err, "Failed to report ensured NEGs on Status reporter")
-			return EnsuredNEGsReportingFailedError
+			return nil, EnsuredNEGsReportingFailedError
 		}
 	}
 
 	s.syncMetricsCollector.UpdateSyncerNegCount(s.NegSyncerKey, negsByLocation)
-	return utilerrors.NewAggregate(errList)
+	return ensuredSubnetZones, utilerrors.NewAggregate(errList)
 }
 
 // syncNetworkEndpoints spins off go routines to execute NEG operations
