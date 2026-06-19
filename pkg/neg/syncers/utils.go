@@ -125,11 +125,11 @@ func getService(serviceLister cache.Indexer, namespace, name string, logger klog
 }
 
 // ensureNetworkEndpointGroup ensures corresponding NEG is configured correctly in the specified zone.
-func ensureNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negServicePortName, kubeSystemUID, port string, networkEndpointType negtypes.NetworkEndpointType, cloud negtypes.NetworkEndpointGroupCloud, serviceLister cache.Indexer, recorder record.EventRecorder, version meta.Version, customName bool, networkInfo network.NetworkInfo, logger klog.Logger, negMetrics *metrics.NegMetrics) (*composite.NetworkEndpointGroup, error) {
+func ensureNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negServicePortName, kubeSystemUID, port string, networkEndpointType negtypes.NetworkEndpointType, cloud negtypes.NetworkEndpointGroupCloud, serviceLister cache.Indexer, recorder record.EventRecorder, version meta.Version, customName, manageLifecycle bool, networkInfo network.NetworkInfo, logger klog.Logger, negMetrics *metrics.NegMetrics) (*composite.NetworkEndpointGroup, error) {
 	negLogger := logger.WithValues("negName", negName, "zone", zone)
 	neg, err := cloud.GetNetworkEndpointGroup(negName, zone, version, logger)
 	if err != nil {
-		if !utils.IsNotFoundError(err) {
+		if !manageLifecycle || !utils.IsNotFoundError(err) {
 			negLogger.Error(err, "Failed to get Neg")
 			return nil, err
 		}

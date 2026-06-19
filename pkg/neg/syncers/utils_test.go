@@ -442,6 +442,7 @@ func TestEnsureNetworkEndpointGroup(t *testing.T) {
 				nil,
 				tc.apiVersion,
 				false,
+				true,
 				tc.networkInfo,
 				klog.TODO(),
 				metrics.NewNegMetrics(),
@@ -501,6 +502,7 @@ func TestEnsureNetworkEndpointGroup(t *testing.T) {
 				nil,
 				tc.apiVersion,
 				false,
+				true,
 				tc.networkInfo,
 				klog.TODO(),
 				metrics.NewNegMetrics(),
@@ -1868,6 +1870,7 @@ func TestNameUniqueness(t *testing.T) {
 		nil,
 		apiVersion,
 		false,
+		true,
 		networkInfo,
 		klog.TODO(),
 		metrics.NewNegMetrics(),
@@ -1900,6 +1903,7 @@ func TestNameUniqueness(t *testing.T) {
 		nil,
 		apiVersion,
 		false,
+		true,
 		networkInfo,
 		klog.TODO(),
 		metrics.NewNegMetrics())
@@ -1948,6 +1952,7 @@ func TestNegObjectCrd(t *testing.T) {
 			nil,
 			apiVersion,
 			false,
+			true,
 			networkInfo,
 			klog.TODO(),
 			metrics.NewNegMetrics())
@@ -1983,6 +1988,7 @@ func TestNegObjectCrd(t *testing.T) {
 			nil,
 			apiVersion,
 			false,
+			true,
 			networkInfo,
 			klog.TODO(),
 			metrics.NewNegMetrics(),
@@ -2155,6 +2161,7 @@ func TestNEGRecreate(t *testing.T) {
 			nil,
 			apiVersion,
 			tc.customName,
+			true,
 			networkInfo,
 			klog.TODO(),
 			metrics.NewNegMetrics(),
@@ -2179,6 +2186,73 @@ func TestNEGRecreate(t *testing.T) {
 		} else if !tc.expectRecreate && (neg.Subnetwork != tc.subnetwork || neg.Network != tc.network) {
 			t.Errorf("TestCase: %s\n Neg should not have been recreated. Expected subnetwork %s, and found %s. Expected network %s, and found %s", tc.desc, tc.subnetwork, neg.Subnetwork, tc.network, neg.Network)
 		}
+	}
+}
+
+func TestEnsureNetworkEndpointGroupManageLifecycle(t *testing.T) {
+	t.Parallel()
+
+	var (
+		testZone             = "test-zone"
+		testNamedPort        = "named-port"
+		testServiceName      = "test-svc"
+		testServiceNameSpace = "test-ns"
+		testNetwork          = cloud.ResourcePath("network", &meta.Key{Zone: testZone, Name: "test-network"})
+		testSubnetwork       = cloud.ResourcePath("subnetwork", &meta.Key{Zone: testZone, Name: "test-subnetwork"})
+		testKubesystemUID    = "cluster-uid"
+		testPort             = "80"
+		negName              = "test-neg"
+		apiVersion           = meta.VersionGA
+		networkInfo          = network.NetworkInfo{
+			NetworkURL:    testNetwork,
+			SubnetworkURL: testSubnetwork,
+		}
+	)
+
+	testCases := []struct {
+		manageLifecycle bool
+	}{
+		{manageLifecycle: true},
+		{manageLifecycle: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("manageLifecycle=%v", tc.manageLifecycle), func(t *testing.T) {
+			fakeCloud := negtypes.NewFakeNetworkEndpointGroupCloud(testSubnetwork, testNetwork)
+
+			// If there is no NEG in location it is expected to be for manageLifecycle=true it should create it
+			// and complete without any errors. Otherwise should return not found error.
+			_, err := ensureNetworkEndpointGroup(
+				testServiceNameSpace,
+				testServiceName,
+				negName,
+				testZone,
+				testNamedPort,
+				testKubesystemUID,
+				testPort,
+				negtypes.VmIpPortEndpointType,
+				fakeCloud,
+				nil,
+				nil,
+				apiVersion,
+				false,
+				tc.manageLifecycle,
+				networkInfo,
+				klog.TODO(),
+				metrics.NewNegMetrics(),
+			)
+
+			if tc.manageLifecycle && err != nil {
+				t.Errorf("Expected no error when manageLifecycle=true but got: %v", err)
+			}
+			if !tc.manageLifecycle {
+				if err == nil {
+					t.Errorf("Expected error when manageLifecycle=false and NEG does not exist, but got nil")
+				} else if !utils.IsNotFoundError(err) {
+					t.Errorf("Expected NotFound error when manageLifecycle=false, but got: %v", err)
+				}
+			}
+		})
 	}
 }
 
