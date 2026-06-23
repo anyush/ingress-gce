@@ -61,7 +61,11 @@ func (p *NEGBindingTopologyProvider) getBinding() (*negbindingv1beta1.NetworkEnd
 	if !exists {
 		return nil, fmt.Errorf("negbinding %s is not in store", key)
 	}
-	return obj.(*negbindingv1beta1.NetworkEndpointGroupBinding), nil
+	binding, ok := obj.(*negbindingv1beta1.NetworkEndpointGroupBinding)
+	if !ok {
+		return nil, fmt.Errorf("cached object %q is of type %T, expected *NetworkEndpointGroupBinding", key, obj)
+	}
+	return binding, nil
 }
 
 // ListSubnets returns the list of subnets declared inside the NegBinding CR Spec.
@@ -72,23 +76,25 @@ func (p *NEGBindingTopologyProvider) ListSubnets(logger klog.Logger) []nodetopol
 		return nil
 	}
 
-	var configs []nodetopologyv1.SubnetConfig
-	for _, ref := range binding.Spec.NetworkEndpointGroups {
+	configs := make([]nodetopologyv1.SubnetConfig, len(binding.Spec.NetworkEndpointGroups))
+	for i, ref := range binding.Spec.NetworkEndpointGroups {
 		key := &meta.Key{
 			Name:   ref.Subnet,
 			Region: p.defaultSubnetID.Key.Region,
 		}
 		subnetPath := cloud.SelfLink(meta.VersionGA, p.defaultSubnetID.ProjectID, p.defaultSubnetID.Resource, key)
-		configs = append(configs, nodetopologyv1.SubnetConfig{
+		configs[i] = nodetopologyv1.SubnetConfig{
 			Name:       ref.Subnet,
 			SubnetPath: subnetPath,
-		})
+		}
 	}
 	return configs
 }
 
 // ListZonesPerSubnet returns a map of subnet to zones defined inside the NegBinding CR Spec.
-func (p *NEGBindingTopologyProvider) ListZonesPerSubnet(filter zonegetter.Filter, logger klog.Logger) (map[string][]string, error) {
+// NEGBinding contains explicit locations (subnet + zone pairs), where NEG controller is expected to
+// manage NEGs ignoring if any endpoints available there. Therefore ignoring filtering.
+func (p *NEGBindingTopologyProvider) ListZonesPerSubnet(_ zonegetter.Filter, logger klog.Logger) (map[string][]string, error) {
 	binding, err := p.getBinding()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get NegBinding from store: %w", err)

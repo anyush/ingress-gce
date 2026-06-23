@@ -17,6 +17,7 @@ limitations under the License.
 package syncers
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -46,6 +47,20 @@ func TestNEGBindingTopologyProvider(t *testing.T) {
 		updatedSubnets  []nodetopologyv1.SubnetConfig                  // expected after update
 		updatedZones    map[string][]string                            // expected after update
 	}{
+		{
+			desc: "Empty NEG list",
+			initialBinding: &negbindingv1beta1.NetworkEndpointGroupBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: namespace,
+					Name:      name,
+				},
+				Spec: negbindingv1beta1.NetworkEndpointGroupBindingSpec{
+					NetworkEndpointGroups: []negbindingv1beta1.SpecNegRef{},
+				},
+			},
+			expectedSubnets: []nodetopologyv1.SubnetConfig{},
+			expectedZones:   map[string][]string{},
+		},
 		{
 			desc: "Single subnet with primary default mapping",
 			initialBinding: &negbindingv1beta1.NetworkEndpointGroupBinding{
@@ -198,5 +213,73 @@ func TestNewNEGBindingTopologyProviderInvalidDefaultSubnetURL(t *testing.T) {
 	_, err := NewNEGBindingTopologyProvider(namespace, name, negBindingLister, "invalid-url-with-no-slashes")
 	if err == nil {
 		t.Error("NewNEGBindingTopologyProvider() with invalid defaultSubnetURL returned no error")
+	}
+}
+
+func TestNEGBindingTopologyProviderInvalidTypeInCache(t *testing.T) {
+	namespace := "test-namespace"
+	name := "test-binding"
+	defaultSubnetURL := "https://www.googleapis.com/compute/v1/projects/test-project/regions/us-central1/subnetworks/default-subnet"
+
+	fakeClient := fakenegbinding.NewSimpleClientset()
+	informer := informernegbinding.NewNetworkEndpointGroupBindingInformer(fakeClient, "", time.Second, utils.NewNamespaceIndexer())
+	negBindingLister := informer.GetIndexer()
+
+	p, err := NewNEGBindingTopologyProvider(namespace, name, negBindingLister, defaultSubnetURL)
+	if err != nil {
+		t.Fatalf("NewNegBindingTopologyProvider() failed unexpectedly: %v", err)
+	}
+
+	invalidObj := &metav1.PartialObjectMetadata{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+		},
+	}
+	negBindingLister.Add(invalidObj)
+
+	subnets := p.ListSubnets(klog.TODO())
+	if subnets != nil {
+		t.Errorf("ListSubnets() returned %v, expected nil when cache has invalid type", subnets)
+	}
+
+	_, err = p.ListZonesPerSubnet(zonegetter.AllNodesFilter, klog.TODO())
+	if err == nil {
+		t.Errorf("ListZonesPerSubnet() returned no error, expected error when cache has invalid type")
+	} else {
+		expectedErr := fmt.Sprintf(`failed to get NegBinding from store: cached object "%s/%s" is of type *v1.PartialObjectMetadata, expected *NetworkEndpointGroupBinding`, namespace, name)
+		if err.Error() != expectedErr {
+			t.Errorf("ListZonesPerSubnet() returned error %q, expected %q", err.Error(), expectedErr)
+		}
+	}
+}
+
+func TestNEGBindingTopologyProviderNEGBindingNotInStore(t *testing.T) {
+	namespace := "test-namespace"
+	name := "test-binding"
+	defaultSubnetURL := "https://www.googleapis.com/compute/v1/projects/test-project/regions/us-central1/subnetworks/default-subnet"
+
+	fakeClient := fakenegbinding.NewSimpleClientset()
+	informer := informernegbinding.NewNetworkEndpointGroupBindingInformer(fakeClient, "", time.Second, utils.NewNamespaceIndexer())
+	negBindingLister := informer.GetIndexer()
+
+	p, err := NewNEGBindingTopologyProvider(namespace, name, negBindingLister, defaultSubnetURL)
+	if err != nil {
+		t.Fatalf("NewNegBindingTopologyProvider() failed unexpectedly: %v", err)
+	}
+
+	subnets := p.ListSubnets(klog.TODO())
+	if subnets != nil {
+		t.Errorf("ListSubnets() returned %v, expected nil when object is not in store", subnets)
+	}
+
+	_, err = p.ListZonesPerSubnet(zonegetter.AllNodesFilter, klog.TODO())
+	if err == nil {
+		t.Errorf("ListZonesPerSubnet() returned no error, expected error when object is not in store")
+	} else {
+		expectedErr := fmt.Sprintf("failed to get NegBinding from store: negbinding %s/%s is not in store", namespace, name)
+		if err.Error() != expectedErr {
+			t.Errorf("ListZonesPerSubnet() returned error %q, expected %q", err.Error(), expectedErr)
+		}
 	}
 }
