@@ -163,6 +163,18 @@ func ensureNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negService
 			(!utils.EqualResourceIDs(neg.Network, networkInfo.NetworkURL) ||
 				!utils.EqualResourceIDs(neg.Subnetwork, networkInfo.SubnetworkURL)) {
 
+			if !manageLifecycle {
+				negLogger.Error(
+					nil,
+					"NEG does not match network and subnetwork of the cluster, but NEGs' lifecycle not managed",
+					"currentNetwork", neg.Network,
+					"expectedNetwork", networkInfo.NetworkURL,
+					"currentSubnetwork", neg.Subnetwork,
+					"expectedSubnetwork", networkInfo.SubnetworkURL,
+				)
+				return nil, fmt.Errorf("NEG %s in zone %s does not match network and subnetwork of the cluster", negName, zone)
+			}
+
 			needToCreate = true
 			negLogger.Info("NEG does not match network and subnetwork of the cluster. Deleting NEG")
 			err = cloud.DeleteNetworkEndpointGroup(negName, zone, version, logger)
