@@ -18,6 +18,7 @@ package neg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -1623,5 +1624,102 @@ func TestNEGBindingManagerReadinessGate(t *testing.T) {
 
 	if m.ReadinessGateEnabled(negtypes.NegSyncerKey{Namespace: namespace, Name: svcName, NEGBindingName: "non-existing"}) {
 		t.Errorf("Expected ReadinessGateEnabled=false for non-existing binding name")
+	}
+}
+
+func TestNEGBindingManagerStopSyncerAfterFailedEnsure(t *testing.T) {
+	fakeGCE := gce.NewFakeGCECloud(gce.DefaultTestClusterValues())
+	namespace := "test-ns"
+	svcName := "test-svc"
+	bindingName := "test-binding"
+	bindingKey := fmt.Sprintf("%s/%s", namespace, bindingName)
+
+	testBinding := &negbindingv1beta1.NetworkEndpointGroupBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      bindingName,
+		},
+		Spec: negbindingv1beta1.NetworkEndpointGroupBindingSpec{
+			BackendRef: &negbindingv1beta1.BackendRefConfig{
+				Kind: negbindingv1beta1.BackendRefKind("InvalidKind"),
+				Name: svcName,
+				Port: 80,
+			},
+			NetworkEndpointGroups: []negbindingv1beta1.SpecNegRef{
+				{
+					Name:   "neg-1",
+					Subnet: "default",
+					Zones:  []string{"us-central1-a"},
+				},
+			},
+		},
+	}
+
+	fakeNBClient := fakenegbinding.NewSimpleClientset(testBinding)
+	indexers := cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+		ServiceKeyIndex:      ServiceKeyIndexFunc,
+	}
+	negBindingLister := informernegbinding.NewNetworkEndpointGroupBindingInformer(fakeNBClient, "", 0, indexers).GetIndexer()
+	if err := negBindingLister.Add(testBinding); err != nil {
+		t.Fatalf("failed to add binding to lister: %v", err)
+	}
+
+	nodeInformer := zonegetter.FakeNodeInformer()
+	zonegetter.PopulateFakeNodeInformer(nodeInformer, false)
+	defaultTestSubnetURL := "https://www.googleapis.com/compute/v1/projects/mock-project/regions/test-region/subnetworks/default"
+	zoneGetter, err := zonegetter.NewFakeZoneGetter(nodeInformer, zonegetter.FakeNodeTopologyInformer(), defaultTestSubnetURL, false)
+	if err != nil {
+		t.Fatalf("failed to create zone getter: %v", err)
+	}
+
+	negMetrics := metrics.FakeNegMetrics()
+	syncerMetrics := metricscollector.FakeSyncerMetrics()
+	cloudAdapter := negtypes.NewAdapterWithNetwork(fakeGCE, "default-network", defaultTestSubnetURL, negMetrics)
+	fakeNetworkResolver := network.NewFakeResolver(&network.NetworkInfo{IsDefault: true, NetworkURL: "default-network", SubnetworkURL: defaultTestSubnetURL})
+
+	m := newNEGBindingManager(
+		fakeNBClient,
+		negBindingLister,
+		cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+		cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+		cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+		cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+		zoneGetter,
+		fakeNetworkResolver,
+		cloudAdapter,
+		record.NewFakeRecorder(100),
+		namer.NewNamer("cluster-id", "", klog.TODO()),
+		negMetrics,
+		syncerMetrics,
+		&readiness.NoopReflector{},
+		"kube-system-uid",
+		"https://container.googleapis.com/v1/projects/test-project/locations/us-central1/clusters/test-cluster",
+		klog.TODO(),
+	)
+	defer m.ShutDown()
+
+	err = m.EnsureSyncerForNEGBinding(testBinding)
+	if !errors.Is(err, ErrInvalidBackendRefKind) {
+		t.Fatalf("EnsureSyncerForNEGBinding error = %v, want %v", err, ErrInvalidBackendRefKind)
+	}
+	if owner := m.ownershipRegistry.GetOwner("neg-1"); owner != bindingKey {
+		t.Fatalf("expected neg-1 to be owned by %q after failed ensure, got %q", bindingKey, owner)
+	}
+	m.mu.Lock()
+	_, syncerExists := m.syncerMap[bindingKey]
+	m.mu.Unlock()
+	if syncerExists {
+		t.Fatalf("expected no syncer in syncerMap after failed ensure")
+	}
+
+	// Simulate CR deletion removing the binding from the informer cache before processNEGBinding calls StopSyncer.
+	if err := negBindingLister.Delete(testBinding); err != nil {
+		t.Fatalf("failed to delete binding from lister: %v", err)
+	}
+	m.StopSyncer(namespace, bindingName)
+
+	if owner := m.ownershipRegistry.GetOwner("neg-1"); owner != "" {
+		t.Errorf("expected neg-1 ownership to be released after StopSyncer, got %q", owner)
 	}
 }

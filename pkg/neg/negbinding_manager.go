@@ -510,7 +510,8 @@ func (m *negBindingManager) ensureSyncerForNEGBinding(
 	bindingKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Name)
 	if len(binding.Spec.NetworkEndpointGroups) == 0 {
 		m.logger.Info("NEGBinding has no NEGs defined", "binding", bindingKey)
-		m.StopSyncer(binding.Namespace, binding.Name)
+		svcKey := fmt.Sprintf("%s/%s", binding.Namespace, svcName)
+		m.stopSyncer(bindingKey, svcKey)
 		return nil, nil
 	}
 
@@ -645,22 +646,27 @@ func (m *negBindingManager) ProcessServiceDeletion(svcNamespace, svcName string)
 // StopSyncer stops the syncer associated with the binding and removes it from the map.
 func (m *negBindingManager) StopSyncer(namespace, name string) {
 	bindingKey := fmt.Sprintf("%s/%s", namespace, name)
-	m.mu.Lock()
-	syncer, ok := m.syncerMap[bindingKey]
-	if ok {
-		syncer.Stop()
-		m.ownershipRegistry.ReleaseAllOwnedExcept(bindingKey, nil)
-		delete(m.syncerMap, bindingKey)
-		delete(m.syncerConfigs, bindingKey)
+	var svcKey string
+	if obj, exists, err := m.negBindingLister.GetByKey(bindingKey); err == nil && exists {
+		if binding, ok := obj.(*negbindingv1beta1.NetworkEndpointGroupBinding); ok {
+			svcKey = fmt.Sprintf("%s/%s", namespace, binding.Spec.BackendRef.Name)
+		}
 	}
+	m.stopSyncer(bindingKey, svcKey)
+}
+
+func (m *negBindingManager) stopSyncer(bindingKey, svcKey string) {
+	m.mu.Lock()
+	if syncer, ok := m.syncerMap[bindingKey]; ok && syncer != nil {
+		syncer.Stop()
+	}
+	m.ownershipRegistry.ReleaseAllOwnedExcept(bindingKey, nil)
+	delete(m.syncerMap, bindingKey)
+	delete(m.syncerConfigs, bindingKey)
 	m.mu.Unlock()
 
-	obj, exists, err := m.negBindingLister.GetByKey(bindingKey)
-	if err == nil && exists {
-		if binding, ok := obj.(*negbindingv1beta1.NetworkEndpointGroupBinding); ok {
-			svcKey := fmt.Sprintf("%s/%s", namespace, binding.Spec.BackendRef.Name)
-			m.updateSyncerMetricsForService(svcKey)
-		}
+	if svcKey != "" {
+		m.updateSyncerMetricsForService(svcKey)
 	}
 }
 
