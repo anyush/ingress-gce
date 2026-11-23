@@ -783,43 +783,25 @@ func (m *negBindingManager) InitializeOwnershipRegistry() error {
 func (m *negBindingManager) ReconcileDeletion(binding *negbindingv1beta1.NetworkEndpointGroupBinding) error {
 	bindingKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Name)
 
-	m.mu.Lock()
-	syncer, ok := m.syncerMap[bindingKey]
-	m.mu.Unlock()
-
-	if !ok {
-		if len(binding.Status.NetworkEndpointGroups) == 0 {
-			m.ownershipRegistry.ReleaseAllOwnedExcept(bindingKey, nil)
-			svcKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Spec.BackendRef.Name)
-			m.updateSyncerMetricsForService(svcKey)
-			return m.removeFinalizer(binding)
-		}
-		if err := m.EnsureSyncerForNEGBinding(binding); err != nil {
-			return fmt.Errorf("failed to start syncer for draining: %w", err)
-		}
-		return nil
-	}
-
 	if len(binding.Status.NetworkEndpointGroups) == 0 {
 		m.logger.Info("Draining complete for NEGBinding, removing finalizer", "binding", bindingKey)
-		syncer.Stop()
-		m.ownershipRegistry.ReleaseAllOwnedExcept(bindingKey, nil)
-
-		func() {
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			delete(m.syncerMap, bindingKey)
-			delete(m.syncerConfigs, bindingKey)
-		}()
-
 		svcKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Spec.BackendRef.Name)
-		m.updateSyncerMetricsForService(svcKey)
-
+		m.stopSyncer(bindingKey, svcKey)
 		return m.removeFinalizer(binding)
 	}
 
-	syncer.Sync()
-	m.logger.Info("NEGBinding is still draining", "binding", bindingKey, "remainingNEGs", len(binding.Status.NetworkEndpointGroups))
+	m.mu.Lock()
+	if syncer, ok := m.syncerMap[bindingKey]; ok && syncer != nil && !syncer.IsStopped() {
+		syncer.Sync()
+		m.mu.Unlock()
+		m.logger.Info("NEGBinding is still draining", "binding", bindingKey, "remainingNEGs", len(binding.Status.NetworkEndpointGroups))
+		return nil
+	}
+	m.mu.Unlock()
+
+	if err := m.EnsureSyncerForNEGBinding(binding); err != nil {
+		return fmt.Errorf("failed to start syncer for draining: %w", err)
+	}
 	return nil
 }
 

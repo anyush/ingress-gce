@@ -1723,3 +1723,244 @@ func TestNEGBindingManagerStopSyncerAfterFailedEnsure(t *testing.T) {
 		t.Errorf("expected neg-1 ownership to be released after StopSyncer, got %q", owner)
 	}
 }
+
+func TestNEGBindingManagerReconcileDeletion(t *testing.T) {
+	const (
+		namespace            = "test-ns"
+		svcName              = "test-svc"
+		bindingName          = "test-binding"
+		negName              = "neg-1"
+		defaultTestSubnetURL = "https://www.googleapis.com/compute/v1/projects/mock-project/regions/test-region/subnetworks/default"
+		defaultTestNEGURL    = "https://www.googleapis.com/compute/v1/projects/mock-project/zones/us-central1-a/networkEndpointGroups/neg-1"
+	)
+	bindingKey := fmt.Sprintf("%s/%s", namespace, bindingName)
+	svcKey := fmt.Sprintf("%s/%s", namespace, svcName)
+
+	testCases := []struct {
+		desc                   string
+		ensureInitialSyncer    bool
+		stopSyncerBeforeDelete bool
+		statusNEGs             []negbindingv1beta1.StatusNegRef
+		expectFinalizerRemoved bool
+		expectSyncerRunning    bool
+		expectSyncerRemoved    bool
+		expectOwnerReleased    bool
+		expectMetricsDeleted   bool
+	}{
+		{
+			desc:                   "empty status without syncer releases owned NEGs, updates metrics, and removes finalizer",
+			ensureInitialSyncer:    false,
+			statusNEGs:             nil,
+			expectFinalizerRemoved: true,
+			expectSyncerRemoved:    true,
+			expectOwnerReleased:    true,
+			expectMetricsDeleted:   true,
+		},
+		{
+			desc:                   "non-empty status with stopped syncer restarts syncer and keeps finalizer",
+			ensureInitialSyncer:    true,
+			stopSyncerBeforeDelete: true,
+			statusNEGs: []negbindingv1beta1.StatusNegRef{
+				{
+					ResourceURL: defaultTestNEGURL,
+					SubnetURL:   defaultTestSubnetURL,
+				},
+			},
+			expectFinalizerRemoved: false,
+			expectSyncerRunning:    true,
+		},
+		{
+			desc:                   "empty status with running syncer stops syncer, cleans maps, releases owned NEGs, updates metrics, and removes finalizer",
+			ensureInitialSyncer:    true,
+			statusNEGs:             nil,
+			expectFinalizerRemoved: true,
+			expectSyncerRemoved:    true,
+			expectOwnerReleased:    true,
+			expectMetricsDeleted:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			fakeGCE := gce.NewFakeGCECloud(gce.DefaultTestClusterValues())
+			testSvc := &apiv1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: namespace,
+					Name:      svcName,
+				},
+				Spec: apiv1.ServiceSpec{
+					Ports: []apiv1.ServicePort{
+						{
+							Name:       "http",
+							Port:       80,
+							TargetPort: intstr.FromInt(8080),
+						},
+					},
+				},
+			}
+			testBinding := &negbindingv1beta1.NetworkEndpointGroupBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:  namespace,
+					Name:       bindingName,
+					Finalizers: []string{NEGBindingFinalizer},
+				},
+				Spec: negbindingv1beta1.NetworkEndpointGroupBindingSpec{
+					BackendRef: &negbindingv1beta1.BackendRefConfig{
+						Kind: negbindingv1beta1.ServiceKind,
+						Name: svcName,
+						Port: 80,
+					},
+					NetworkEndpointGroups: []negbindingv1beta1.SpecNegRef{
+						{
+							Name:   negName,
+							Subnet: "default",
+							Zones:  []string{"us-central1-a"},
+						},
+					},
+				},
+			}
+
+			fakeNBClient := fakenegbinding.NewSimpleClientset(testBinding.DeepCopy())
+			indexers := cache.Indexers{
+				cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+				ServiceKeyIndex:      ServiceKeyIndexFunc,
+			}
+			negBindingLister := informernegbinding.NewNetworkEndpointGroupBindingInformer(fakeNBClient, "", 0, indexers).GetIndexer()
+			if err := negBindingLister.Add(testBinding.DeepCopy()); err != nil {
+				t.Fatalf("failed to add binding to lister: %v", err)
+			}
+
+			serviceLister := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+			if err := serviceLister.Add(testSvc); err != nil {
+				t.Fatalf("failed to add service to lister: %v", err)
+			}
+
+			nodeInformer := zonegetter.FakeNodeInformer()
+			zonegetter.PopulateFakeNodeInformer(nodeInformer, false)
+			zoneGetter, err := zonegetter.NewFakeZoneGetter(nodeInformer, zonegetter.FakeNodeTopologyInformer(), defaultTestSubnetURL, false)
+			if err != nil {
+				t.Fatalf("failed to create zone getter: %v", err)
+			}
+
+			negMetrics := metrics.FakeNegMetrics()
+			syncerMetrics := metricscollector.FakeSyncerMetrics()
+			cloudAdapter := negtypes.NewAdapterWithNetwork(fakeGCE, "default-network", defaultTestSubnetURL, negMetrics)
+			fakeNetworkResolver := network.NewFakeResolver(&network.NetworkInfo{IsDefault: true, NetworkURL: "default-network", SubnetworkURL: defaultTestSubnetURL})
+
+			m := newNEGBindingManager(
+				fakeNBClient,
+				negBindingLister,
+				cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+				serviceLister,
+				cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+				cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+				zoneGetter,
+				fakeNetworkResolver,
+				cloudAdapter,
+				record.NewFakeRecorder(100),
+				namer.NewNamer("cluster-id", "", klog.TODO()),
+				negMetrics,
+				syncerMetrics,
+				&readiness.NoopReflector{},
+				"kube-system-uid",
+				"https://container.googleapis.com/v1/projects/test-project/locations/us-central1/clusters/test-cluster",
+				klog.TODO(),
+			)
+			defer m.ShutDown()
+
+			var initialSyncer negtypes.NegSyncer
+			if tc.ensureInitialSyncer {
+				if err := m.EnsureSyncerForNEGBinding(testBinding.DeepCopy()); err != nil {
+					t.Fatalf("EnsureSyncerForNEGBinding failed: %v", err)
+				}
+				m.mu.Lock()
+				initialSyncer = m.syncerMap[bindingKey]
+				m.mu.Unlock()
+				if initialSyncer == nil {
+					t.Fatalf("expected syncer in syncerMap after EnsureSyncerForNEGBinding")
+				}
+				if _, ok := syncerMetrics.GetNegService(svcKey); !ok {
+					t.Fatalf("expected syncerMetrics to contain %q after EnsureSyncerForNEGBinding", svcKey)
+				}
+
+				if tc.stopSyncerBeforeDelete {
+					initialSyncer.Stop()
+					err := wait.PollUntilContextTimeout(context.Background(), 10*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
+						return initialSyncer.IsStopped() && !initialSyncer.IsShuttingDown(), nil
+					})
+					if err != nil {
+						t.Fatalf("timed out waiting for syncer to stop cleanly: %v", err)
+					}
+				}
+			} else {
+				acquired, _ := m.ownershipRegistry.Acquire(negName, bindingKey)
+				if !acquired {
+					t.Fatalf("failed to pre-acquire %q for %q", negName, bindingKey)
+				}
+				syncerMetrics.SetNegBindingService(svcKey, metricscollector.NegServiceState{NegBindingNeg: 1})
+			}
+
+			deletingBinding := testBinding.DeepCopy()
+			now := metav1.Now()
+			deletingBinding.DeletionTimestamp = &now
+			deletingBinding.Status.NetworkEndpointGroups = tc.statusNEGs
+			if _, err := fakeNBClient.NetworkingV1beta1().NetworkEndpointGroupBindings(namespace).Update(context.Background(), deletingBinding.DeepCopy(), metav1.UpdateOptions{}); err != nil {
+				t.Fatalf("failed to update binding in fake client: %v", err)
+			}
+			if err := negBindingLister.Update(deletingBinding.DeepCopy()); err != nil {
+				t.Fatalf("failed to update binding in lister: %v", err)
+			}
+
+			if err := m.ReconcileDeletion(deletingBinding); err != nil {
+				t.Fatalf("ReconcileDeletion failed: %v", err)
+			}
+
+			gotBinding, err := fakeNBClient.NetworkingV1beta1().NetworkEndpointGroupBindings(namespace).Get(context.Background(), bindingName, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("failed to get binding from fake client: %v", err)
+			}
+			hasFinalizer := slices.Contains(gotBinding.Finalizers, NEGBindingFinalizer)
+			if tc.expectFinalizerRemoved && hasFinalizer {
+				t.Errorf("expected %s to be removed, got finalizers %v", NEGBindingFinalizer, gotBinding.Finalizers)
+			}
+			if !tc.expectFinalizerRemoved && !hasFinalizer {
+				t.Errorf("expected %s to remain attached, got finalizers %v", NEGBindingFinalizer, gotBinding.Finalizers)
+			}
+
+			m.mu.Lock()
+			currentSyncer, hasSyncer := m.syncerMap[bindingKey]
+			_, hasConfig := m.syncerConfigs[bindingKey]
+			m.mu.Unlock()
+
+			if tc.expectSyncerRunning {
+				if !hasSyncer || currentSyncer == nil {
+					t.Fatalf("expected syncer to exist in syncerMap during draining")
+				}
+				if currentSyncer.IsStopped() {
+					t.Errorf("expected stopped syncer to be restarted during draining")
+				}
+			}
+			if tc.expectSyncerRemoved {
+				if hasSyncer {
+					t.Errorf("expected syncer to be removed from syncerMap")
+				}
+				if hasConfig {
+					t.Errorf("expected config to be removed from syncerConfigs")
+				}
+				if initialSyncer != nil && !initialSyncer.IsStopped() {
+					t.Errorf("expected existing syncer to be stopped")
+				}
+			}
+			if tc.expectOwnerReleased {
+				if owner := m.ownershipRegistry.GetOwner(negName); owner != "" {
+					t.Errorf("expected %q ownership to be released, got %q", negName, owner)
+				}
+			}
+			if tc.expectMetricsDeleted {
+				if state, ok := syncerMetrics.GetNegService(svcKey); ok {
+					t.Errorf("expected syncerMetrics entry for %q to be deleted, got %+v", svcKey, state)
+				}
+			}
+		})
+	}
+}
