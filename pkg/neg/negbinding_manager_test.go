@@ -1740,6 +1740,7 @@ func TestNEGBindingManagerReconcileDeletion(t *testing.T) {
 		desc                   string
 		ensureInitialSyncer    bool
 		stopSyncerBeforeDelete bool
+		clearSpecBeforeDelete  bool
 		statusNEGs             []negbindingv1beta1.StatusNegRef
 		expectFinalizerRemoved bool
 		expectSyncerRunning    bool
@@ -1760,6 +1761,20 @@ func TestNEGBindingManagerReconcileDeletion(t *testing.T) {
 			desc:                   "non-empty status with stopped syncer restarts syncer and keeps finalizer",
 			ensureInitialSyncer:    true,
 			stopSyncerBeforeDelete: true,
+			statusNEGs: []negbindingv1beta1.StatusNegRef{
+				{
+					ResourceURL: defaultTestNEGURL,
+					SubnetURL:   defaultTestSubnetURL,
+				},
+			},
+			expectFinalizerRemoved: false,
+			expectSyncerRunning:    true,
+		},
+		{
+			desc:                   "non-empty status with empty spec and stopped syncer restarts syncer and keeps finalizer",
+			ensureInitialSyncer:    true,
+			stopSyncerBeforeDelete: true,
+			clearSpecBeforeDelete:  true,
 			statusNEGs: []negbindingv1beta1.StatusNegRef{
 				{
 					ResourceURL: defaultTestNEGURL,
@@ -1903,6 +1918,9 @@ func TestNEGBindingManagerReconcileDeletion(t *testing.T) {
 			deletingBinding := testBinding.DeepCopy()
 			now := metav1.Now()
 			deletingBinding.DeletionTimestamp = &now
+			if tc.clearSpecBeforeDelete {
+				deletingBinding.Spec.NetworkEndpointGroups = nil
+			}
 			deletingBinding.Status.NetworkEndpointGroups = tc.statusNEGs
 			if _, err := fakeNBClient.NetworkingV1beta1().NetworkEndpointGroupBindings(namespace).Update(context.Background(), deletingBinding.DeepCopy(), metav1.UpdateOptions{}); err != nil {
 				t.Fatalf("failed to update binding in fake client: %v", err)

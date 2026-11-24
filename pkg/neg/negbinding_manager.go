@@ -508,7 +508,7 @@ func (m *negBindingManager) ensureSyncerForNEGBinding(
 	}
 
 	bindingKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Name)
-	if len(binding.Spec.NetworkEndpointGroups) == 0 {
+	if len(binding.Spec.NetworkEndpointGroups) == 0 && len(binding.Status.NetworkEndpointGroups) == 0 {
 		m.logger.Info("NEGBinding has no NEGs defined", "binding", bindingKey)
 		svcKey := fmt.Sprintf("%s/%s", binding.Namespace, svcName)
 		m.stopSyncer(bindingKey, svcKey)
